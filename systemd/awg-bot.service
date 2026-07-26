@@ -1,0 +1,19 @@
+[Unit]
+Description=AmneziaWG Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Токен — фактически пароль от сервера, а юниты в /etc/systemd/system читаются
+# всеми (644). Поэтому все переменные, включая токен, вынесены в файл с
+# правами 600 — его создаёт установщик.
+EnvironmentFile=/opt/awg3/bot.env
+ExecStart=/opt/awg3/venv/bin/python /opt/awg3/bot/awg_bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

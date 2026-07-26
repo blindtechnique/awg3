@@ -1,0 +1,6 @@
+[Unit]
+Description=AmneziaWG expire temporary clients
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/awg-client expire-check

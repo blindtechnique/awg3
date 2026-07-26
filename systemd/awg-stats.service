@@ -1,0 +1,8 @@
+[Unit]
+Description=AmneziaWG stats collector (one poll)
+
+[Service]
+Type=oneshot
+Environment=AWG_STATS_DB=/opt/awg3/stats.db
+Environment=AWG_DIR=/etc/amnezia/amneziawg
+ExecStart=/opt/awg3/venv/bin/python /opt/awg3/awg_stats.py poll

@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# awg-client.sh — клиенты AmneziaWG.
+#
+#   awg-client add  <имя> [awg2|awg3] [--ttl 2h]   создать (conf + QR + vpn://)
+#   awg-client del  <имя> [awg2|awg3]              удалить
+#   awg-client list [awg2|awg3]                    список
+#   awg-client regen-all                           пересобрать конфиги под
+#                                                  текущий профиль обфускации
+#   awg-client expire-check                        удалить просроченные временные
+#
+# Сервис = слой: awg2 — kernel-датапас (2.0), awg3 — userspace (3.0). У каждого
+# своя подсеть, свой порт и свой профиль обфускации; параметры обфускации у
+# сервера и клиента обязаны совпадать, иначе handshake невозможен.
+set -euo pipefail
+
+AWG_DIR=/etc/amnezia/amneziawg
+DEST=/opt/awg3
+SERVICES="$AWG_DIR/services.env"
+CLIENT_DIR="$DEST/clients"
+EXPORT="$DEST/awg-export.py"
+EXPIRY_FILE="$DEST/expiry.tsv"
+# Экспортёру нужен segno для QR — он ставится в venv, а не в системный python.
+# Если venv есть, работаем им, иначе откатываемся на системный интерпретатор.
+PY="$DEST/venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+log() { printf '\033[1;36m[awg-client]\033[0m %s\n' "$*"; }
+err() { printf '\033[1;31m[awg-client]\033[0m %s\n' "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+[ -f "$SERVICES" ] || die "нет $SERVICES — сначала установка"
+
+default_service() {
+    # shellcheck disable=SC1090
+    . "$SERVICES"
+    [ "${LAYER2:-0}" = 1 ] && { echo awg2; return 0; }
+    echo awg3
+}
+
+# ── сервис → интерфейс, подсеть, порт, слой ──────────────────────────────────
+resolve_service() {
+    local svc="${1:-}"
+    # shellcheck disable=SC1090
+    . "$SERVICES"
+    [ -n "$svc" ] || svc="$(default_service)"
+    LAYER=2
+    case "$svc" in
+        awg2|2)
+            [ "${LAYER2:-0}" = 1 ] || die "слой 2.0 не установлен"
+            SVC=awg2; IFACE="${IFACE2:-awg2}"; SUBNET="${SUBNET2:-10.29.79}"
+            PORT="${PORT2:-0}"; MTU="${MTU2:-1420}"; LAYER=2 ;;
+        awg3|3)
+            [ "${LAYER3:-0}" = 1 ] || die "слой 3.0 не установлен"
+            SVC=awg3; IFACE="${IFACE3:-awg3}"; SUBNET="${SUBNET3:-10.29.80}"
+            PORT="${PORT3:-0}"; MTU="${MTU3:-1380}"; LAYER=3 ;;
+        *) die "неизвестный сервис '$svc' (awg2|awg3)" ;;
+    esac
+    SERVER_CONF="$AWG_DIR/${IFACE}.conf"
+    [ -f "$SERVER_CONF" ] || die "нет серверного конфига $SERVER_CONF"
+    return 0
+}
+
+# ── профиль обфускации своего слоя ───────────────────────────────────────────
+load_obfuscation() {
+    local keys="Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5"
+    # STATE_ENV задаём явно в обеих ветках: regen-all перебирает оба слоя в
+    # одном процессе, и «залипшее» значение указало бы на чужой профиль
+    STATE_ENV="$AWG_DIR/obfuscation.env"
+    if [ "${LAYER:-2}" = 3 ]; then
+        STATE_ENV="$AWG_DIR/obfuscation3.env"
+        keys="$keys HeaderProtectionKey ContentPaddingAddition RekeyAfterTime"
+        keys="$keys RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts"
+    fi
+    [ -f "$STATE_ENV" ] || die "нет $STATE_ENV — сначала awg-obfuscation"
+    # shellcheck disable=SC1090
+    . "$STATE_ENV"
+    AWG_OBFUSCATION=""
+    local k v val
+    for k in $keys; do
+        v="AWG_${k}"; val="${!v:-}"
+        [ -n "$val" ] && AWG_OBFUSCATION+="${k} = ${val}"$'\n'
+    done
+    AWG_OBFUSCATION="${AWG_OBFUSCATION%$'\n'}"
+    return 0
+}
+
+server_pubkey() {
+    # cut -d= -f2- сохраняет хвостовой '=' base64-ключа (awk -F' *= *' его срезал бы)
+    grep '^PrivateKey' "$SERVER_CONF" | head -1 | cut -d= -f2- | tr -d ' \t' | awg pubkey
+}
+
+next_ip() {
+    local used i
+    used="$(grep -oE "AllowedIPs = ${SUBNET//./\\.}\.[0-9]+" "$SERVER_CONF" | grep -oE '[0-9]+$' || true)"
+    for i in $(seq 2 254); do
+        echo "$used" | grep -qx "$i" || { echo "${SUBNET}.${i}"; return 0; }
+    done
+    die "свободные адреса в ${SUBNET}.0/24 закончились"
+}
+
+ttl_seconds() {
+    local t="$1" n unit
+    n="${t%[smhd]}"; unit="${t##*[0-9]}"
+    case "$unit" in
+        s) echo "$n" ;; m) echo $((n*60)) ;; h) echo $((n*3600)) ;;
+        d) echo $((n*86400)) ;; *) echo "" ;;
+    esac
+}
+
+# ── создать клиента ──────────────────────────────────────────────────────────
+add_client() {
+    local name="$1" svc="${2:-}" ttl="${3:-}"
+    resolve_service "$svc"; load_obfuscation
+    local outdir="${CLIENT_DIR}/${SVC}"; mkdir -p "$outdir"
+    local conf="${outdir}/${SVC}-${name}-am.conf"
+    [ -f "$conf" ] && die "клиент '$name' ($SVC) уже существует"
+
+    local cpriv cpub cpsk cip host dns
+    cpriv="$(awg genkey)"; cpub="$(printf '%s' "$cpriv" | awg pubkey)"
+    cpsk="$(awg genpsk)"; cip="$(next_ip)"
+    host="${ENDPOINT:-}"
+    [ -n "$host" ] || host="$(curl -4 -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+    dns="${DNS:-1.1.1.1, 8.8.8.8}"
+
+    umask 077
+    cat > "$conf" <<EOF
+[Interface]
+PrivateKey = ${cpriv}
+Address = ${cip}/32
+DNS = ${dns}
+MTU = ${MTU}
+${AWG_OBFUSCATION}
+
+[Peer]
+PublicKey = $(server_pubkey)
+PresharedKey = ${cpsk}
+Endpoint = ${host}:${PORT}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 15
+EOF
+    chmod 600 "$conf"
+
+    # peer на сервере: в рантайме и в конфиге (чтобы пережил перезапуск)
+    awg set "$IFACE" peer "$cpub" preshared-key <(printf '%s' "$cpsk") \
+        allowed-ips "${cip}/32" 2>/dev/null || \
+        log "интерфейс не поднят — peer записан только в конфиг"
+    cat >> "$SERVER_CONF" <<EOF
+
+[Peer]
+# ${name}
+PublicKey = ${cpub}
+PresharedKey = ${cpsk}
+AllowedIPs = ${cip}/32
+EOF
+
+    # QR (сырой conf) + ссылка vpn:// + QR ссылки
+    "$PY" "$EXPORT" "$conf" --name "${SVC}-${name}" --outdir "$outdir" --all >/dev/null 2>&1 || \
+        log "экспортёр отработал с замечаниями — .conf на месте"
+
+    local note=""
+    if [ -n "$ttl" ]; then
+        local secs; secs="$(ttl_seconds "$ttl")"
+        if [ -n "$secs" ]; then
+            local when=$(( $(date +%s) + secs ))
+            mkdir -p "$(dirname "$EXPIRY_FILE")"
+            printf '%s\t%s\t%s\n' "$name" "$SVC" "$when" >> "$EXPIRY_FILE"
+            note=" · до $(date -d "@$when" '+%Y-%m-%d %H:%M')"
+        else
+            log "TTL '$ttl' не распознан (примеры: 30m, 2h, 7d) — клиент бессрочный"
+        fi
+    fi
+
+    log "клиент '$name' ($SVC)${note} создан:"
+    log "  conf  : $conf"
+    log "  QR    : ${outdir}/${SVC}-${name}.png"
+    log "  vpn://: ${outdir}/${SVC}-${name}.vpn"
+    echo "$conf"
+}
+
+# ── удалить клиента ──────────────────────────────────────────────────────────
+del_client() {
+    local name="$1" svc="${2:-}"
+    resolve_service "$svc"
+    local outdir="${CLIENT_DIR}/${SVC}"
+    local conf="${outdir}/${SVC}-${name}-am.conf"
+    [ -f "$conf" ] || die "клиент '$name' ($SVC) не найден"
+    local cpriv cpub
+    cpriv="$(grep '^PrivateKey' "$conf" | head -1 | cut -d= -f2- | tr -d ' \t')"
+    cpub="$(printf '%s' "$cpriv" | awg pubkey)"
+    awg set "$IFACE" peer "$cpub" remove 2>/dev/null || true
+    python3 - "$SERVER_CONF" "$cpub" <<'PY'
+import sys
+path, pub = sys.argv[1], sys.argv[2]
+blocks, cur = [], []
+for line in open(path, encoding="utf-8").read().splitlines():
+    if line.strip().startswith("[Peer]"):
+        blocks.append(cur); cur = [line]
+    else:
+        cur.append(line)
+blocks.append(cur)
+keep = [b for b in blocks if pub not in "\n".join(b)]
+open(path, "w", encoding="utf-8").write(
+    "\n".join("\n".join(b) for b in keep).rstrip() + "\n")
+PY
+    rm -f "$conf" "${outdir}/${SVC}-${name}"*.png "${outdir}/${SVC}-${name}.vpn"
+    if [ -f "$EXPIRY_FILE" ]; then
+        grep -v -P "^${name}\t${SVC}\t" "$EXPIRY_FILE" > "${EXPIRY_FILE}.tmp" 2>/dev/null || true
+        mv -f "${EXPIRY_FILE}.tmp" "$EXPIRY_FILE" 2>/dev/null || true
+    fi
+    log "клиент '$name' ($SVC) удалён"
+    return 0
+}
+
+list_clients() {
+    local svc="${1:-}"
+    resolve_service "$svc"
+    ls -1 "${CLIENT_DIR}/${SVC}"/*-am.conf 2>/dev/null \
+        | sed "s#.*/${SVC}-##;s/-am.conf//" || true
+    return 0
+}
+
+# ── пересобрать конфиги под текущий профиль ──────────────────────────────────
+regen_all() {
+    # shellcheck disable=SC1090
+    . "$SERVICES"
+    local svc conf name
+    # Ненужные слои отсеиваем ДО resolve_service: она завершается через die(),
+    # то есть уронила бы весь regen-all, а не одну итерацию.
+    for svc in awg2 awg3; do
+        case "$svc" in
+            awg2) [ "${LAYER2:-0}" = 1 ] || continue
+                  [ -f "$AWG_DIR/obfuscation.env" ] || continue ;;
+            awg3) [ "${LAYER3:-0}" = 1 ] || continue
+                  [ -f "$AWG_DIR/obfuscation3.env" ] || continue ;;
+        esac
+        [ -d "${CLIENT_DIR}/${svc}" ] || continue
+        resolve_service "$svc"; load_obfuscation
+        for conf in "${CLIENT_DIR}/${svc}"/*-am.conf; do
+            [ -f "$conf" ] || continue
+            name="$(basename "$conf" | sed "s/^${svc}-//;s/-am.conf//")"
+            python3 - "$conf" "$AWG_OBFUSCATION" <<'PY'
+import sys
+path, block = sys.argv[1], sys.argv[2]
+txt = open(path, encoding="utf-8").read().splitlines()
+obf = {"Jc","Jmin","Jmax","S1","S2","S3","S4","H1","H2","H3","H4","I1","I2","I3","I4","I5",
+       "HeaderProtectionKey","ContentPaddingAddition","RekeyAfterTime","RekeyTimeout",
+       "RejectAfterTime","KeepaliveTimeout","MaxHandshakeAttempts"}
+out, in_iface = [], False
+for line in txt:
+    key = line.split("=", 1)[0].strip() if "=" in line else ""
+    if line.strip().startswith("[Interface]"):
+        in_iface = True; out.append(line); continue
+    if line.strip().startswith("[Peer]"):
+        if in_iface:
+            out.extend(block.splitlines()); out.append("")
+        in_iface = False; out.append(line); continue
+    if key in obf:
+        continue
+    out.append(line)
+open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+            "$PY" "$EXPORT" "$conf" --name "${svc}-${name}" \
+                --outdir "$(dirname "$conf")" --all >/dev/null 2>&1 || true
+            log "пересоздан: $svc/$name"
+        done
+    done
+    return 0
+}
+
+# ── временные клиенты ────────────────────────────────────────────────────────
+expire_check() {
+    [ -f "$EXPIRY_FILE" ] || exit 0
+    local now tmp name svc when
+    now="$(date +%s)"; tmp="$(mktemp)"
+    while IFS=$'\t' read -r name svc when; do
+        [ -n "$name" ] || continue
+        if [ "$now" -ge "$when" ] 2>/dev/null; then
+            log "срок клиента '$name' ($svc) истёк — удаляю"
+            del_client "$name" "$svc" >/dev/null 2>&1 || true
+        else
+            printf '%s\t%s\t%s\n' "$name" "$svc" "$when" >> "$tmp"
+        fi
+    done < "$EXPIRY_FILE"
+    mv "$tmp" "$EXPIRY_FILE"
+}
+
+case "${1:-}" in
+    add)
+        [ $# -ge 2 ] || die "укажи имя: add <имя> [awg2|awg3] [--ttl 2h]"
+        name="$2"; svc=""; ttl=""
+        shift 2
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --ttl) ttl="$2"; shift 2 ;;
+                awg2|awg3|2|3) svc="$1"; shift ;;
+                # молчаливое игнорирование незнакомого слова прячет опечатки:
+                # запрос на несуществующий слой должен быть ошибкой, а не сюрпризом
+                *) die "неизвестный аргумент '$1' (сервисы: awg2|awg3, срок: --ttl 2h)" ;;
+            esac
+        done
+        add_client "$name" "$svc" "$ttl" ;;
+    del)
+        [ $# -ge 2 ] || die "укажи имя: del <имя> [awg2|awg3]"
+        del_client "$2" "${3:-}" ;;
+    list)         list_clients "${2:-}" ;;
+    regen-all)    regen_all ;;
+    expire-check) expire_check ;;
+    *) grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;;
+esac
