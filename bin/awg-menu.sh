@@ -35,6 +35,16 @@ c_dim=$'\033[2m'; c_b=$'\033[1m'; c_x=$'\033[0m'
 
 pause() { printf '\n%sНажми Enter…%s' "$c_dim" "$c_x"; read -r _ || true; }
 
+# Очистка экрана. `clear` есть не везде (нет TERM, урезанный образ) — тогда
+# отправляем управляющую последовательность напрямую.
+cls() { clear 2>/dev/null || printf '\033[H\033[2J'; }
+
+# Юнит слоя 3.0 зависит от режима: userspace-датапас или общий awg-quick
+unit3() {
+    if [ "${KMOD3:-0}" = 1 ]; then echo "awg-quick@${IFACE3:-awg3}"
+    else echo "awg3@${IFACE3:-awg3}"; fi
+}
+
 layers() {  # печатает доступные слои: awg2 awg3
     local out=""
     [ "${LAYER2:-0}" = 1 ] && out="awg2"
@@ -56,14 +66,14 @@ pick_layer() {  # pick_layer <имя_переменной>
 
 # ── экраны ───────────────────────────────────────────────────────────────────
 screen_status() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Состояние ═══%s\n\n' "$c_hdr" "$c_x"
     printf '  Адрес сервера : %s%s%s\n' "$c_b" "${ENDPOINT:-—}" "$c_x"
     local svc iface port sub unit state n
     for svc in $(layers); do
         case "$svc" in
             awg2) iface="${IFACE2}"; port="${PORT2}"; sub="${SUBNET2}"; unit="awg-quick@${IFACE2}" ;;
-            awg3) iface="${IFACE3}"; port="${PORT3}"; sub="${SUBNET3}"; unit="awg3@${IFACE3}" ;;
+            awg3) iface="${IFACE3}"; port="${PORT3}"; sub="${SUBNET3}"; unit="$(unit3)" ;;
         esac
         if systemctl is-active --quiet "$unit"; then state="${c_ok}работает${c_x}"; else state="${c_no}остановлен${c_x}"; fi
         n="$(ls -1 "$DEST/clients/$svc"/*-am.conf 2>/dev/null | wc -l)"
@@ -83,7 +93,7 @@ screen_status() {
 }
 
 screen_info() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Информация о сервере ═══%s\n\n' "$c_hdr" "$c_x"
     "$PY" "$DEST/awg_stats.py" server 2>/dev/null | sed 's/<[^>]*>//g' || \
         echo "статистика недоступна"
@@ -91,7 +101,7 @@ screen_info() {
 }
 
 screen_clients_list() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Клиенты ═══%s\n' "$c_hdr" "$c_x"
     local svc n
     for svc in $(layers); do
@@ -107,7 +117,7 @@ screen_clients_list() {
 }
 
 screen_client_add() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Новый клиент ═══%s\n' "$c_hdr" "$c_x"
     local svc name ttl a
     pick_layer svc
@@ -131,7 +141,7 @@ screen_client_add() {
 }
 
 screen_client_del() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Удалить клиента ═══%s\n' "$c_hdr" "$c_x"
     local svc name a
     pick_layer svc
@@ -146,7 +156,7 @@ screen_client_del() {
 }
 
 screen_client_show() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Конфиг клиента ═══%s\n' "$c_hdr" "$c_x"
     local svc name conf base
     pick_layer svc
@@ -168,7 +178,7 @@ screen_client_show() {
 }
 
 screen_stats() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Статистика ═══%s\n\n' "$c_hdr" "$c_x"
     "$PY" "$DEST/awg_stats.py" poll >/dev/null 2>&1 || true
     "$PY" "$DEST/awg_stats.py" overview 2>/dev/null | sed 's/<[^>]*>//g' || echo "нет данных"
@@ -177,7 +187,7 @@ screen_stats() {
 
 screen_obfuscation() {
     while :; do
-        clear
+        cls
         printf '%s═══ Обфускация ═══%s\n\n' "$c_hdr" "$c_x"
         echo "   1) Показать текущий профиль"
         echo "   2) Перегенерировать (новые сигнатуры, тот же пресет)"
@@ -217,7 +227,7 @@ screen_obfuscation() {
 }
 
 screen_backup() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Бэкап ═══%s\n\n' "$c_hdr" "$c_x"
     echo "   1) Создать архив"
     echo "   2) Создать зашифрованный архив"
@@ -235,14 +245,14 @@ screen_backup() {
 }
 
 screen_doctor() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Диагностика ═══%s\n\n' "$c_hdr" "$c_x"
     echo "   1) Быстрая проверка"
     echo "   2) Глубокая (поднимает тестовый туннель, до минуты)"
     echo "   3) Проверить выдаваемые конфиги"
     echo "   0) Назад"
     local a; printf '\n  Выбор [1]: '; read -r a || a=1
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     case "${a:-1}" in
         1) "$DEST/awg-doctor.sh" ;;
         2) "$DEST/awg-doctor.sh" --deep ;;
@@ -253,7 +263,7 @@ screen_doctor() {
 }
 
 screen_bot() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Telegram-бот ═══%s\n\n' "$c_hdr" "$c_x"
     if [ -f /etc/systemd/system/awg-bot.service ]; then
         systemctl status awg-bot --no-pager -l 2>/dev/null | head -6
@@ -280,7 +290,7 @@ screen_bot() {
 }
 
 screen_service() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Сервисы ═══%s\n\n' "$c_hdr" "$c_x"
     echo "   1) Перезапустить туннели"
     echo "   2) Журнал слоя 2.0"
@@ -291,18 +301,18 @@ screen_service() {
         1) for svc in $(layers); do
                case "$svc" in
                    awg2) systemctl restart "awg-quick@${IFACE2}" && echo "  2.0 перезапущен" ;;
-                   awg3) systemctl restart "awg3@${IFACE3}" && echo "  3.0 перезапущен" ;;
+                   awg3) systemctl restart "$(unit3)" && echo "  3.0 перезапущен" ;;
                esac
            done ;;
         2) journalctl -u "awg-quick@${IFACE2:-awg2}" -n 40 --no-pager ;;
-        3) journalctl -u "awg3@${IFACE3:-awg3}" -n 40 --no-pager ;;
+        3) journalctl -u "$(unit3)" -n 40 --no-pager ;;
         *) return 0 ;;
     esac
     pause
 }
 
 screen_uninstall() {
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     printf '%s═══ Удаление ═══%s\n\n' "$c_no" "$c_x"
     echo "  Будут удалены сервисы, интерфейсы, правила NAT, ВСЕ клиенты"
     echo "  и ключи сервера, статистика и собранные бинарники."
@@ -331,7 +341,7 @@ fi
 
 # ── главное меню ────────────────────────────────────────────────────────────
 while :; do
-    clear 2>/dev/null || printf '    clear33[H    clear33[2J'
+    cls
     ver="2.0"; [ "${LAYER2:-0}" = 1 ] && [ "${LAYER3:-0}" = 1 ] && ver="2.0 + 3.0"
     [ "${LAYER2:-0}" = 0 ] && ver="3.0"
     printf '%s╔══════════════════════════════════════════════╗%s\n' "$c_hdr" "$c_x"

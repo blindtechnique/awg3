@@ -10,6 +10,8 @@
 #   awg-obfuscation.sh --preset high --template web --fp chrome --apply
 #   awg-obfuscation.sh --show          # показать текущий профиль
 #   awg-obfuscation.sh --regenerate    # перегенерировать I-пакеты (новые сигнатуры)
+#   awg-obfuscation.sh --reapply       # применить текущий профиль заново
+#                                      # (значения не меняются, клиенты живы)
 #
 # Параметры (кроме Jc/Jmin/Jmax) обязаны совпадать client<->server — поэтому
 # единый источник истины: $STATE_ENV. client-awg.sh читает его же.
@@ -32,6 +34,8 @@ CONFS="${AWG_CONFS:-${AWG_DIR}/${IFACE2:-awg2}.conf}"
 
 PRESET="medium"; TEMPLATE=""; FP="chrome"; HOST=""; MTU=0; EXTREME=0
 APPLY=0; SHOW=0; REGEN=0; INTERACTIVE=1
+# --reapply: разложить уже сгенерированный профиль заново, ничего не меняя
+REAPPLY=0
 # --v3: генерировать профиль для слоя AmneziaWG 3.0 (свои файлы состояния,
 # параметры header protection / content padding / таймингов)
 V3=0
@@ -49,6 +53,7 @@ while [ $# -gt 0 ]; do
         --apply)     APPLY=1; INTERACTIVE=0; shift ;;
         --show)      SHOW=1; INTERACTIVE=0; shift ;;
         --regenerate) REGEN=1; INTERACTIVE=0; shift ;;
+        --reapply)   REAPPLY=1; APPLY=1; INTERACTIVE=0; shift ;;
         -h|--help)   grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Неизвестный флаг: $1" >&2; exit 2 ;;
     esac
@@ -150,21 +155,37 @@ GEN_ARGS=(--preset "$PRESET" --fp "$FP")
 [ "$MTU" != 0 ] && GEN_ARGS+=(--mtu "$MTU")
 [ "$EXTREME" = 1 ] && GEN_ARGS+=(--extreme)
 
-log "Генерация профиля: preset=$PRESET template=${TEMPLATE:-default} fp=$FP"
-# ГЕНЕРИРУЕМ ПРОФИЛЬ ОДИН РАЗ (в env-формат). Серверный [Interface]-блок выводим
-# из ТОГО ЖЕ env — иначе два вызова генератора дали бы разные случайные профили,
-# и обфускация сервера не совпала бы с клиентами (клиенты читают этот же env) →
-# handshake был бы невозможен.
-ENV_BLOCK="$(python3 "$GEN" "${GEN_ARGS[@]}" --format env)"
+if [ "$REAPPLY" = 1 ]; then
+    # Профиль не трогаем: он уже согласован с выданными клиентами. Нужно лишь
+    # разложить его заново — например когда меняется способ применения
+    # параметров 3.0 (конфиг вместо UAPI при переходе на ядро).
+    [ -s "$STATE_ENV" ] || { err "нет $STATE_ENV — нечего применять"; exit 1; }
+    log "Повторное применение существующего профиля (значения не меняются)"
+else
+    log "Генерация профиля: preset=$PRESET template=${TEMPLATE:-default} fp=$FP"
+    # ГЕНЕРИРУЕМ ПРОФИЛЬ ОДИН РАЗ (в env-формат). Серверный [Interface]-блок выводим
+    # из ТОГО ЖЕ env — иначе два вызова генератора дали бы разные случайные профили,
+    # и обфускация сервера не совпала бы с клиентами (клиенты читают этот же env) →
+    # handshake был бы невозможен.
+    ENV_BLOCK="$(python3 "$GEN" "${GEN_ARGS[@]}" --format env)"
 
-# ── сохранить state ──────────────────────────────────────────────────────────
-mkdir -p "$AWG_DIR"
-umask 077
-printf '%s\n' "$ENV_BLOCK" > "$STATE_ENV"
+    # ── сохранить state ──────────────────────────────────────────────────────
+    mkdir -p "$AWG_DIR"
+    umask 077
+    printf '%s\n' "$ENV_BLOCK" > "$STATE_ENV"
+fi
 # серверный блок — строго из сохранённого env (порядок ключей фиксирован)
+# Ключи, которые пишутся прямо в [Interface]. Параметры 3.0 попадают сюда
+# только в режиме ядра: там их понимает `awg setconf` из ветки feat/awg3.
+# В обычном режиме они уезжают отдельным файлом .v3 через UAPI.
+CONF_KEYS="Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5"
+if [ "$V3" = 1 ] && [ "${KMOD3:-0}" = 1 ]; then
+    CONF_KEYS="$CONF_KEYS HeaderProtectionKey ContentPaddingAddition RekeyAfterTime"
+    CONF_KEYS="$CONF_KEYS RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts"
+fi
 IFACE_BLOCK="$(
     . "$STATE_ENV"
-    for k in Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5; do
+    for k in $CONF_KEYS; do
         v="AWG_${k}"; val="${!v:-}"
         [ -n "$val" ] && printf '%s = %s\n' "$k" "$val"
     done
@@ -177,7 +198,7 @@ IFACE_BLOCK="$(
 # Берём их из ТОГО ЖЕ STATE_ENV, что и блок [Interface], — второй запуск
 # генератора дал бы другие случайные значения, и клиенты не сошлись бы с сервером.
 V3_BLOCK=""
-if [ "$V3" = 1 ]; then
+if [ "$V3" = 1 ] && [ "${KMOD3:-0}" != 1 ]; then
     V3_BLOCK="$(
         # shellcheck disable=SC1090
         . "$STATE_ENV"
@@ -192,7 +213,8 @@ if [ "$V3" = 1 ]; then
     )"
 fi
 
-cat > "$STATE_META" <<EOF
+# при повторном применении ответы пользователя остаются прежними
+[ "$REAPPLY" = 1 ] || cat > "$STATE_META" <<EOF
 META_PRESET=$PRESET
 META_TEMPLATE=$TEMPLATE
 META_FP=$FP
@@ -249,7 +271,8 @@ if [ "$APPLY" = 1 ]; then
     # Слой 3.0 живёт в userspace-юните awg3@, а не в awg-quick@: у него свой
     # датапас (amneziawg-go) и v3-ключи, которых awg-tools не понимают —
     # их применяет awg-datapath.sh через UAPI-сокет уже после старта.
-    if [ "$V3" = 1 ]; then unit_pfx="awg3@"; else unit_pfx="awg-quick@"; fi
+    # В режиме ядра слой 3.0 поднимает тот же awg-quick, что и слой 2.0
+    if [ "$V3" = 1 ] && [ "${KMOD3:-0}" != 1 ]; then unit_pfx="awg3@"; else unit_pfx="awg-quick@"; fi
     for i in $ifaces; do
         if systemctl list-unit-files | grep -q "$unit_pfx"; then
             log "Перезапуск ${unit_pfx}${i} (чистый старт)"

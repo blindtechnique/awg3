@@ -94,7 +94,10 @@ do_restore() {
     # shellcheck disable=SC1090
     [ -f "$AWG_DIR/services.env" ] && . "$AWG_DIR/services.env" 2>/dev/null || true
     [ "${LAYER2:-0}" = 1 ] && systemctl restart "awg-quick@${IFACE2:-awg2}" 2>/dev/null || true
-    [ "${LAYER3:-0}" = 1 ] && systemctl restart "awg3@${IFACE3:-awg3}" 2>/dev/null || true
+    if [ "${LAYER3:-0}" = 1 ]; then
+        if [ "${KMOD3:-0}" = 1 ]; then u3="awg-quick@${IFACE3:-awg3}"; else u3="awg3@${IFACE3:-awg3}"; fi
+        systemctl restart "$u3" 2>/dev/null || true
+    fi
     log "Восстановление завершено. Проверка: awg-doctor"
     return 0
 }

@@ -41,7 +41,13 @@ head_() { REPORT+=("SECTION|$1"); [ "$JSON" = 1 ] || printf '\n\033[1m%s\033[0m\
 [ -f "$SERVICES" ] || { echo "Сервер не установлен: нет $SERVICES" >&2; exit 3; }
 # shellcheck disable=SC1090
 . "$SERVICES"
-LAYER2="${LAYER2:-0}"; LAYER3="${LAYER3:-0}"
+LAYER2="${LAYER2:-0}"; LAYER3="${LAYER3:-0}"; KMOD3="${KMOD3:-0}"
+
+# Юнит слоя 3.0 зависит от режима: userspace-датапас или общий awg-quick
+unit3() {
+    if [ "$KMOD3" = 1 ]; then echo "awg-quick@${IFACE3:-awg3}"
+    else echo "awg3@${IFACE3:-awg3}"; fi
+}
 
 # ── система ─────────────────────────────────────────────────────────────────
 head_ "Система"
@@ -70,7 +76,7 @@ fi
 # ── интерфейсы слоёв ────────────────────────────────────────────────────────
 check_iface() {  # check_iface <имя> <порт> <подсеть> <слой>
     local i="$1" p="$2" sub="$3" layer="$4" unit peers
-    [ "$layer" = 3 ] && unit="awg3@$i" || unit="awg-quick@$i"
+    [ "$layer" = 3 ] && unit="$(unit3)" || unit="awg-quick@$i"
     if ip link show "$i" >/dev/null 2>&1; then
         ok "$i поднят ($(ip -4 -br addr show "$i" 2>/dev/null | awk '{print $3}'))"
     else
@@ -99,12 +105,48 @@ if [ "$LAYER2" = 1 ]; then
 fi
 
 if [ "$LAYER3" = 1 ]; then
-    head_ "Слой AmneziaWG 3.0 (userspace)"
-    if command -v amneziawg-go >/dev/null 2>&1; then ok "amneziawg-go установлен"
-    else bad "нет amneziawg-go"; fi
+    if [ "$KMOD3" = 1 ]; then
+        head_ "Слой AmneziaWG 3.0 (kernel-модуль, экспериментально)"
+        if grep -rqs WGDEVICE_A_HEADER_PROTECTION_KEY \
+             /opt/src/amneziawg-linux-kernel-module/src/uapi/wireguard.h 2>/dev/null; then
+            ok "модуль собран из ветки с поддержкой 3.0"
+        else
+            bad "модуль без поддержки 3.0 — переустанови с --kmod3"
+        fi
+    else
+        head_ "Слой AmneziaWG 3.0 (userspace)"
+        if command -v amneziawg-go >/dev/null 2>&1; then ok "amneziawg-go установлен"
+        else bad "нет amneziawg-go"; fi
+    fi
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
-    # параметры 3.0 живут только в памяти демона — читаем через UAPI
-    if [ -x "$DEST/awg-uapi.py" ] && python3 "$DEST/awg-uapi.py" show "${IFACE3:-awg3}" 2>/dev/null \
+    if [ "$KMOD3" = 1 ]; then
+        # Известная поломка ветки feat/awg3: политика netlink в модуле объявляет
+        # WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL как NLA_U64, а утилиты шлют u32,
+        # поэтому ЛЮБОЙ peer с PersistentKeepalive отвергается. Клиенты при этом
+        # молча не подключаются, так что проверяем прицельно и по существу.
+        probe="awgprobe$$"
+        if ip link add "$probe" type amneziawg 2>/dev/null; then
+            probe_conf="$(mktemp)"
+            printf '[Interface]\nPrivateKey = %s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.255.255.1/32\nPersistentKeepalive = 15\n' \
+                "$(awg genkey)" "$(awg genkey | awg pubkey)" > "$probe_conf"
+            if awg setconf "$probe" "$probe_conf" 2>/dev/null; then
+                ok "модуль принимает PersistentKeepalive"
+            else
+                bad "модуль отвергает PersistentKeepalive — клиенты не подключатся. Это баг ветки feat/awg3 (netlink: NLA_U64 против u32). Вернись в штатный режим: install.sh --update без --kmod3"
+            fi
+            rm -f "$probe_conf"
+            ip link del "$probe" 2>/dev/null
+        fi
+    fi
+    # Где искать подтверждение: в ядре его печатает сам `awg show`, у
+    # userspace-датапаса параметры живут только в памяти — читаем через UAPI.
+    if [ "$KMOD3" = 1 ]; then
+        if awg show "${IFACE3:-awg3}" 2>/dev/null | grep -qi "header protection"; then
+            ok "header protection применена"
+        else
+            warn "параметры 3.0 не применены — датапас работает как 2.0"
+        fi
+    elif [ -x "$DEST/awg-uapi.py" ] && python3 "$DEST/awg-uapi.py" show "${IFACE3:-awg3}" 2>/dev/null \
          | grep -q header_protection_key; then
         ok "header protection применена"
     else
@@ -184,7 +226,7 @@ deep_check() {  # deep_check <awg2|awg3>
     # DNS внутри namespace не нужен и мешает поднятию туннеля
     grep -v '^DNS' "$conf" > "$AWG_DIR/$tmp.conf"; chmod 600 "$AWG_DIR/$tmp.conf"
 
-    if [ "$svc" = awg3 ]; then
+    if [ "$svc" = awg3 ] && [ "${KMOD3:-0}" != 1 ]; then
         # Слой 3.0 нельзя проверить через awg-quick: параметры 3.0 в конфиге
         # утилиты не понимают, а kernel-модуль их не умеет. Поднимаем клиента
         # тем же userspace-демоном и досылаем v3-параметры через UAPI.

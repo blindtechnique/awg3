@@ -30,6 +30,22 @@ latest_tag() {  # latest_tag <owner/repo>
         | awk -F/ '{print $NF}' | grep -E '^v[0-9]' | sort -V | tail -1
 }
 
+# Готов ли kernel-модуль к 3.0. Проверяем не номер PR, а саму возможность:
+# есть ли в заголовке ветки master netlink-атрибут header protection. Как
+# только апстрим вольёт PR #192, ответ сменится сам, без правок скрипта.
+kmod3_state() {
+    local url=https://raw.githubusercontent.com/amnezia-vpn/amneziawg-linux-kernel-module
+    if curl -fsS --max-time 15 "$url/master/src/uapi/wireguard.h" 2>/dev/null \
+         | grep -q WGDEVICE_A_HEADER_PROTECTION_KEY; then
+        echo master; return 0
+    fi
+    if curl -fsS --max-time 15 "$url/feat/awg3/src/uapi/wireguard.h" 2>/dev/null \
+         | grep -q WGDEVICE_A_HEADER_PROTECTION_KEY; then
+        echo branch; return 0
+    fi
+    echo unknown
+}
+
 installed_go_ref() {
     [ -d "$SRC/amneziawg-go/.git" ] || { echo ""; return; }
     git -C "$SRC/amneziawg-go" describe --tags --exact-match 2>/dev/null \
@@ -74,8 +90,14 @@ if [ -f "$DEST/.rev" ]; then
     else add_row "код awg3 ($branch)" "$cur" "${new:-?}" 0; fi
 fi
 
+# состояние поддержки 3.0 в ядре — только когда слой 3.0 вообще установлен
+KMOD3_STATE=""
+# shellcheck disable=SC1090
+[ -f /etc/amnezia/amneziawg/services.env ] && . /etc/amnezia/amneziawg/services.env 2>/dev/null || true
+[ "${LAYER3:-0}" = 1 ] && KMOD3_STATE="$(kmod3_state)"
+
 if [ "$JSON" = 1 ]; then
-    printf '{"updates": %d, "items": [' "$UPDATES"
+    printf '{"updates": %d, "kmod3": "%s", "items": [' "$UPDATES" "${KMOD3_STATE:-n/a}"
     first=1
     for r in "${ROWS[@]}"; do
         IFS='|' read -r what cur new upd <<< "$r"
@@ -99,6 +121,29 @@ elif [ "$QUIET" = 0 ]; then
         echo "Обновить код слоя:  bash install.sh --update"
         echo "(конфиги, порты и клиенты при этом не меняются)"
     fi
+
+    # Отдельной строкой — не обновление, а смена возможностей апстрима.
+    case "$KMOD3_STATE" in
+        master)
+            echo
+            if [ "${KMOD3:-0}" = 1 ]; then
+                echo "Слой 3.0 в ядре: поддержка доехала до master — можно снять пометку"
+                echo "«экспериментально» и перейти на релизные версии."
+            else
+                echo "🟢 Слой 3.0 появился в kernel-модуле апстрима (master)."
+                echo "   Датапас 3.0 можно перевести с userspace на ядро — это быстрее."
+                echo "   Клиентов перевыпускать не нужно: параметры и ключи те же."
+            fi ;;
+        branch)
+            echo
+            if [ "${KMOD3:-0}" = 1 ]; then
+                echo "Режим --kmod3: модуль и утилиты собраны из ветки feat/awg3."
+                echo "Она ещё не влита в master и меняется часто — следи за обновлениями."
+            else
+                echo "Слой 3.0 в ядре пока готовится (ветка feat/awg3, PR #192)."
+                echo "Сейчас 3.0 работает через userspace-датапас — это штатный режим."
+            fi ;;
+    esac
 fi
 
 [ "$UPDATES" -gt 0 ] && exit 10

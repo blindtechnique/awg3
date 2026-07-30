@@ -32,6 +32,11 @@
 #   --reconfigure     новый профиль обфускации (клиентам нужны новые конфиги)
 #   --uninstall       удалить всё, что поставил этот скрипт
 #   --yes             не переспрашивать (для автоматизации)
+#   --no-kmod3        вернуть слой 3.0 на userspace-датапас (штатный режим)
+#   --kmod3           ЭКСПЕРИМЕНТ: слой 3.0 на kernel-модуле вместо userspace.
+#                     Собирает модуль и утилиты из ветки feat/awg3 апстрима —
+#                     она не влита в master и правится почти ежедневно.
+#                     Быстрее, но ломается вместе с апстримом. См. README.
 #
 # Без флагов на уже установленном сервере открывается меню.
 set -euo pipefail
@@ -49,6 +54,10 @@ AWG_GO_REF="${AWG_GO_REF:-v3.0.2}"
 AWG_TOOLS_REF="${AWG_TOOLS_REF:-v1.0.20260618-2}"
 GO_VER="${GO_VER:-1.24.4}"
 SRC=/opt/src
+# Ветка апстрима, где 3.0 делается для ядра (PR #192, в master не влито).
+# Используется только в экспериментальном режиме --kmod3.
+AWG3_KMOD_BRANCH="${AWG3_KMOD_BRANCH:-feat/awg3}"
+KMOD3=0; KMOD3_OFF=0; MODE_SWITCH=0
 
 NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0
 INSTALL_BOT=0; REMOVE_BOT=0; ASSUME_YES=0
@@ -95,6 +104,8 @@ while [ $# -gt 0 ]; do
         --reconfigure) RECONFIGURE=1; shift ;;
         --uninstall)  UNINSTALL=1; shift ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
+        --kmod3)      KMOD3=1; MODE_SWITCH=1; shift ;;
+        --no-kmod3)   KMOD3=0; KMOD3_OFF=1; MODE_SWITCH=1; shift ;;
         -h|--help)    grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Неизвестный флаг: $1" >&2; exit 2 ;;
     esac
@@ -103,6 +114,13 @@ done
 log() { printf '\033[1;35m[install]\033[0m %s\n' "$*" >&2; }
 err() { printf '\033[1;31m[install]\033[0m %s\n' "$*" >&2; }
 installed() { [ -f "$SERVICES" ]; }
+
+# Имя юнита слоя 3.0: в обычном режиме это userspace-датапас, в режиме --kmod3
+# интерфейс поднимает тот же awg-quick, что и слой 2.0.
+unit3() {
+    if [ "${KMOD3:-0}" = 1 ]; then echo "awg-quick@${IFACE3:-awg3}"
+    else echo "awg3@${IFACE3:-awg3}"; fi
+}
 
 [ "$(id -u)" = 0 ] || { err "нужны права root"; exit 1; }
 
@@ -210,19 +228,47 @@ install_go() {
 # amneziawg-tools нужны обоим слоям: ими читается состояние интерфейса и
 # применяется конфиг (для 3.0 — всё, кроме собственно параметров 3.0).
 install_tools() {
-    if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
-        # Суффикс «-2» — часть версии (v1.0.20260618-2), в шаблон он включён
-        local cur; cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1)"
-        if [ "$cur" = "$AWG_TOOLS_REF" ]; then
-            log "amneziawg-tools $cur — актуальны"
-            return 0
-        fi
-        log "amneziawg-tools ${cur:-?} → $AWG_TOOLS_REF: пересборка…"
+    # В режиме --kmod3 нужны утилиты, понимающие параметры 3.0 в конфиге, —
+    # они пока только в ветке. Тег в этом случае не используем.
+    local ref="$AWG_TOOLS_REF"
+    [ "$KMOD3" = 1 ] && ref="$AWG3_KMOD_BRANCH"
+
+    # Собранное из ветки и собранное из тега сообщают ОДНУ И ТУ ЖЕ версию, так
+    # что по `awg --version` их не различить. Смотрим на исходники: есть ли в
+    # них поддержка 3.0. Если она не совпадает с запрошенным режимом — пересборка.
+    local src_has_v3=0
+    grep -qs HeaderProtectionKey "$SRC/amneziawg-tools/src/config.c" 2>/dev/null && src_has_v3=1
+    if [ "$src_has_v3" != "$KMOD3" ] && [ -d "$SRC/amneziawg-tools" ]; then
+        log "amneziawg-tools собраны не под текущий режим — пересборка из $ref"
+        rm -rf "$SRC/amneziawg-tools"
     fi
-    log "amneziawg-tools ($AWG_TOOLS_REF): сборка из исходников…"
+
+    if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1 \
+       && [ -d "$SRC/amneziawg-tools" ]; then
+        if [ "$KMOD3" = 1 ]; then
+            # у ветки нет версии — сверяем ревизию исходников
+            local cur_rev want_rev
+            cur_rev="$(git -C "$SRC/amneziawg-tools" rev-parse --short HEAD 2>/dev/null || true)"
+            want_rev="$(git ls-remote https://github.com/amnezia-vpn/amneziawg-tools.git \
+                        "refs/heads/$ref" 2>/dev/null | cut -c1-7)"
+            if [ -n "$cur_rev" ] && [ "$cur_rev" = "$want_rev" ]; then
+                log "amneziawg-tools ($ref, $cur_rev) — актуальны"
+                return 0
+            fi
+        else
+            # Суффикс «-2» — часть версии (v1.0.20260618-2), в шаблон он включён
+            local cur; cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1)"
+            if [ "$cur" = "$AWG_TOOLS_REF" ]; then
+                log "amneziawg-tools $cur — актуальны"
+                return 0
+            fi
+            log "amneziawg-tools ${cur:-?} → $AWG_TOOLS_REF: пересборка…"
+        fi
+    fi
+    log "amneziawg-tools ($ref): сборка из исходников…"
     mkdir -p "$SRC"
     rm -rf "$SRC/amneziawg-tools"
-    git clone --quiet --depth 1 --branch "$AWG_TOOLS_REF" \
+    git clone --quiet --depth 1 --branch "$ref" \
         https://github.com/amnezia-vpn/amneziawg-tools.git "$SRC/amneziawg-tools" 2>/dev/null || \
         git clone --quiet --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git "$SRC/amneziawg-tools"
     make -s -C "$SRC/amneziawg-tools/src" -j"$(nproc)" >/dev/null
@@ -233,19 +279,40 @@ install_tools() {
 
 # kernel-модуль нужен только слою 2.0
 install_kmod() {
+    local want_branch=""
+    [ "$KMOD3" = 1 ] && want_branch="$AWG3_KMOD_BRANCH"
+
+    # Собранный модуль о своей ветке не рассказывает — смотрим исходники.
+    # Режим и модуль должны совпадать в обе стороны: ветка нужна для --kmod3,
+    # а при возврате в штатный режим её нужно сменить обратно на master —
+    # иначе на сервере остаётся код с недоделанным netlink.
+    local kmod_has_v3=0
+    grep -qs WGDEVICE_A_HEADER_PROTECTION_KEY \
+        "$SRC/amneziawg-linux-kernel-module/src/uapi/wireguard.h" 2>/dev/null && kmod_has_v3=1
+
     if modinfo amneziawg >/dev/null 2>&1; then
-        log "kernel-модуль amneziawg уже собран"
-        modprobe amneziawg 2>/dev/null || true
-        return 0
+        if [ "$kmod_has_v3" != "$KMOD3" ]; then
+            if [ "$KMOD3" = 1 ]; then
+                log "kernel-модуль без поддержки 3.0 — пересобираю из ветки $want_branch"
+            else
+                log "kernel-модуль из ветки feat/awg3 — возвращаю релизный из master"
+            fi
+        else
+            log "kernel-модуль amneziawg уже собран"
+            modprobe amneziawg 2>/dev/null || true
+            return 0
+        fi
     fi
-    log "kernel-модуль amneziawg: сборка DKMS…"
+    log "kernel-модуль amneziawg${want_branch:+ ($want_branch)}: сборка DKMS…"
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y -qq dkms "linux-headers-$(uname -r)" build-essential >/dev/null 2>&1 || true
     mkdir -p "$SRC"
     rm -rf "$SRC/amneziawg-linux-kernel-module"
-    git clone --quiet --depth 1 \
+    git clone --quiet --depth 1 ${want_branch:+--branch "$want_branch"} \
         https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git \
         "$SRC/amneziawg-linux-kernel-module"
+    # старый модуль в памяти не даст загрузить новый
+    rmmod amneziawg 2>/dev/null || true
     ( cd "$SRC/amneziawg-linux-kernel-module/src" && make -s >/dev/null && make -s install >/dev/null ) || {
         err "модуль не собрался — слой 2.0 недоступен"
         return 1
@@ -355,8 +422,13 @@ resolve_endpoint() {
 plan_services() {
     # порты закрепляются навсегда: от них зависят все выданные конфиги
     if installed; then
+        local cli_kmod3="$KMOD3"
         # shellcheck disable=SC1090
         . "$SERVICES"
+        # флаг из командной строки сильнее сохранённого: так включают и
+        # выключают экспериментальный режим на уже работающем сервере
+        [ "$cli_kmod3" = 1 ] && KMOD3=1
+        [ "$KMOD3_OFF" = 1 ] && KMOD3=0
         log "Параметры из $SERVICES (порты и подсети не меняются)"
         return 0
     fi
@@ -398,6 +470,10 @@ write_services() {
         echo "ENDPOINT='$ENDPOINT'"
         echo "WAN='$WAN'"
         echo "CLIENT_DIR='$CLIENT_DIR'"
+        # KMOD3=1 — слой 3.0 обслуживается kernel-модулем, а не amneziawg-go.
+        # От этого зависят имя юнита, способ применения параметров 3.0 и
+        # проверки в диагностике, поэтому значение живёт здесь.
+        echo "KMOD3='$KMOD3'"
     } > "$SERVICES"
     chmod 600 "$SERVICES"
 }
@@ -474,24 +550,34 @@ add_nat_rules() {  # add_nat_rules <имя> <подсеть>
 
 build_interfaces() {
     [ "$LAYER2" = 1 ] && { build_iface "$IFACE2" "$SUBNET2" "$PORT2" "$MTU2" 2; add_nat_rules "$IFACE2" "$SUBNET2"; }
-    [ "$LAYER3" = 1 ] && build_iface "$IFACE3" "$SUBNET3" "$PORT3" "$MTU3" 3
+    if [ "$LAYER3" = 1 ]; then
+        build_iface "$IFACE3" "$SUBNET3" "$PORT3" "$MTU3" 3
+        # В режиме ядра интерфейс поднимает awg-quick, и NAT некому настроить —
+        # прописываем правила в сам конфиг, как для слоя 2.0. В обычном режиме
+        # этим занимается awg-datapath.sh при старте демона.
+        [ "$KMOD3" = 1 ] && add_nat_rules "$IFACE3" "$SUBNET3"
+    fi
     return 0
 }
 
 # ── обфускация ───────────────────────────────────────────────────────────────
 gen_obfuscation() {
     local P="${AWG_PRESET:-medium}" T="${AWG_TEMPLATE:-}" F="${AWG_FP:-chrome}"
+    # Смена датапаса — не повод менять параметры обфускации: у уже выданных
+    # клиентов они прописаны в конфигах. Профиль просто раскладываем заново.
+    local mode=--apply
+    [ "$MODE_SWITCH" = 1 ] && [ "$RECONFIGURE" != 1 ] && [ -s "$AWG_DIR/obfuscation.env" ] && mode=--reapply
     if [ "$LAYER2" = 1 ]; then
         log "Профиль обфускации 2.0: preset=$P template=${T:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE2}.conf" "$DEST/awg-obfuscation.sh" \
             --preset "$P" ${T:+--template "$T"} --fp "$F" --mtu "$MTU2" \
-            ${ENDPOINT:+--host "$ENDPOINT"} --apply
+            ${ENDPOINT:+--host "$ENDPOINT"} "$mode"
     fi
     if [ "$LAYER3" = 1 ]; then
         log "Профиль обфускации 3.0: preset=$P template=${T:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE3}.conf" "$DEST/awg-obfuscation.sh" --v3 \
             --preset "$P" ${T:+--template "$T"} --fp "$F" --mtu "$MTU3" \
-            ${ENDPOINT:+--host "$ENDPOINT"} --apply
+            ${ENDPOINT:+--host "$ENDPOINT"} "$mode"
     fi
 }
 
@@ -503,12 +589,20 @@ enable_units() {
         systemctl start "awg-quick@${IFACE2}" || err "слой 2.0 не стартовал — journalctl -u awg-quick@${IFACE2}"
     fi
     if [ "$LAYER3" = 1 ]; then
-        systemctl enable "awg3@${IFACE3}" >/dev/null 2>&1 || true
-        systemctl stop "awg3@${IFACE3}" 2>/dev/null || true
+        local u3; u3="$(unit3)"
+        # при смене режима второй юнит нужно погасить, иначе два сервиса
+        # будут драться за один интерфейс
+        systemctl disable --now "awg3@${IFACE3}" 2>/dev/null || true
+        [ "$KMOD3" = 1 ] || systemctl disable --now "awg-quick@${IFACE3}" 2>/dev/null || true
+        # погашенный юнит может остаться в состоянии failed и мозолить глаза
+        # в systemctl status — сбрасываем, он больше не используется
+        systemctl reset-failed "awg3@${IFACE3}" "awg-quick@${IFACE3}" 2>/dev/null || true
+        systemctl enable "$u3" >/dev/null 2>&1 || true
+        systemctl stop "$u3" 2>/dev/null || true
         ip link del "$IFACE3" 2>/dev/null || true
-        systemctl start "awg3@${IFACE3}" || {
+        systemctl start "$u3" || {
             err "слой 3.0 не стартовал. Последние строки журнала:"
-            journalctl -u "awg3@${IFACE3}" -n 12 --no-pager 2>/dev/null | sed 's/^/    /' >&2
+            journalctl -u "$u3" -n 12 --no-pager 2>/dev/null | sed 's/^/    /' >&2
         }
     fi
     # статистика и авто-удаление временных клиентов
@@ -779,8 +873,16 @@ main() {
     esac
 
     install_tools
-    [ "$LAYER2" = 1 ] && { install_kmod || { err "слой 2.0 отключён: модуль не собрался"; LAYER2=0; }; }
-    [ "$LAYER3" = 1 ] && install_awg_go
+    # В режиме --kmod3 модуль нужен обоим слоям: он же обслуживает и 3.0
+    if [ "$LAYER2" = 1 ] || [ "$KMOD3" = 1 ]; then
+        install_kmod || {
+            err "модуль не собрался"
+            [ "$KMOD3" = 1 ] && { err "режим --kmod3 без модуля невозможен"; exit 1; }
+            LAYER2=0
+        }
+    fi
+    # userspace-датапас нужен, только когда 3.0 живёт не в ядре
+    [ "$LAYER3" = 1 ] && [ "$KMOD3" = 0 ] && install_awg_go
     [ "$LAYER2" = 0 ] && [ "$LAYER3" = 0 ] && { err "ни один слой не поднялся"; exit 1; }
 
     ENDPOINT="${AWG_ENDPOINT:-$ENDPOINT}"
