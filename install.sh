@@ -311,8 +311,21 @@ install_kmod() {
     git clone --quiet --depth 1 ${want_branch:+--branch "$want_branch"} \
         https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git \
         "$SRC/amneziawg-linux-kernel-module"
-    # старый модуль в памяти не даст загрузить новый
-    rmmod amneziawg 2>/dev/null || true
+
+    # Модуль нельзя подменить «на живую»: пока существует хоть один интерфейс,
+    # rmmod не сработает, в памяти останется прежняя версия — и она разойдётся
+    # с только что пересобранными утилитами (разный формат netlink). Поэтому
+    # гасим свои интерфейсы, выгружаем модуль и поднимаем всё заново ниже.
+    if lsmod 2>/dev/null | grep -q '^amneziawg'; then
+        local i
+        for i in "${IFACE2:-awg2}" "${IFACE3:-awg3}"; do
+            systemctl stop "awg-quick@$i" "awg3@$i" 2>/dev/null || true
+            ip link del "$i" 2>/dev/null || true
+        done
+        if ! rmmod amneziawg 2>/dev/null; then
+            err "модуль amneziawg занят и не выгружается — новая версия заработает после перезагрузки"
+        fi
+    fi
     ( cd "$SRC/amneziawg-linux-kernel-module/src" && make -s >/dev/null && make -s install >/dev/null ) || {
         err "модуль не собрался — слой 2.0 недоступен"
         return 1
