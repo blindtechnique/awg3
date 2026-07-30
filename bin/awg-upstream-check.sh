@@ -55,7 +55,10 @@ fi
 
 # ── amneziawg-tools: ставится пакетом, сравниваем с тегом апстрима ──────────
 if command -v awg >/dev/null 2>&1; then
-    cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*' | head -1)"
+    # ВАЖНО: суффикс «-2» — часть версии (v1.0.20260618-2). Без него в шаблоне
+    # установленная версия обрезалась до v1.0.20260618 и не совпадала с тегом,
+    # из-за чего скрипт вечно докладывал о несуществующем обновлении.
+    cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1)"
     [ -n "$cur" ] || cur="(пакет)"
     new="$(latest_tag amnezia-vpn/amneziawg-tools)"
     if [ -n "$new" ] && [ "$new" != "$cur" ]; then add_row "amneziawg-tools" "$cur" "$new" 1
@@ -63,12 +66,12 @@ if command -v awg >/dev/null 2>&1; then
 fi
 
 # ── код слоя ────────────────────────────────────────────────────────────────
-if [ -f "$DEST/.layer-rev" ]; then
-    cur="$(cat "$DEST/.layer-rev")"
-    branch="$(cat "$DEST/.layer-branch" 2>/dev/null || echo main)"
+if [ -f "$DEST/.rev" ]; then
+    cur="$(cat "$DEST/.rev")"
+    branch="$(cat "$DEST/.branch" 2>/dev/null || echo main)"
     new="$(git ls-remote "https://github.com/blindtechnique/awg3.git" "refs/heads/$branch" 2>/dev/null | cut -c1-12)"
-    if [ -n "$new" ] && [ "$new" != "$cur" ]; then add_row "az-awg2 ($branch)" "$cur" "$new" 1
-    else add_row "az-awg2 ($branch)" "$cur" "${new:-?}" 0; fi
+    if [ -n "$new" ] && [ "$new" != "$cur" ]; then add_row "код awg3 ($branch)" "$cur" "$new" 1
+    else add_row "код awg3 ($branch)" "$cur" "${new:-?}" 0; fi
 fi
 
 if [ "$JSON" = 1 ]; then

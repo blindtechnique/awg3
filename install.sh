@@ -45,7 +45,7 @@ SERVICES="$AWG_DIR/services.env"
 CLIENT_DIR="$DEST/clients"
 
 # версии апстрима (переопределяются переменными окружения)
-AWG_GO_REF="${AWG_GO_REF:-v3.0.1}"
+AWG_GO_REF="${AWG_GO_REF:-v3.0.2}"
 AWG_TOOLS_REF="${AWG_TOOLS_REF:-v1.0.20260618-2}"
 GO_VER="${GO_VER:-1.24.4}"
 SRC=/opt/src
@@ -211,8 +211,13 @@ install_go() {
 # применяется конфиг (для 3.0 — всё, кроме собственно параметров 3.0).
 install_tools() {
     if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
-        log "amneziawg-tools уже установлены"
-        return 0
+        # Суффикс «-2» — часть версии (v1.0.20260618-2), в шаблон он включён
+        local cur; cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1)"
+        if [ "$cur" = "$AWG_TOOLS_REF" ]; then
+            log "amneziawg-tools $cur — актуальны"
+            return 0
+        fi
+        log "amneziawg-tools ${cur:-?} → $AWG_TOOLS_REF: пересборка…"
     fi
     log "amneziawg-tools ($AWG_TOOLS_REF): сборка из исходников…"
     mkdir -p "$SRC"
@@ -253,9 +258,17 @@ install_kmod() {
 
 # userspace-датапас нужен слою 3.0
 install_awg_go() {
+    # Раньше здесь стояла просто проверка «бинарник есть — выходим», и из-за
+    # неё --update никогда не подтягивал новую версию датапаса: проверка
+    # обновлений сообщала о ней, а обновление ничего не делало.
     if command -v amneziawg-go >/dev/null 2>&1; then
-        log "amneziawg-go уже установлен"
-        return 0
+        local cur; cur="$(amneziawg-go --version 2>&1 | grep -oE 'v[0-9][0-9.]*' | head -1)"
+        if [ "$cur" = "$AWG_GO_REF" ]; then
+            log "amneziawg-go $cur — актуален"
+            return 0
+        fi
+        log "amneziawg-go ${cur:-?} → $AWG_GO_REF: пересборка…"
+        AWG_GO_REBUILT=1
     fi
     install_go
     log "amneziawg-go ($AWG_GO_REF): сборка из исходников…"
@@ -704,7 +717,17 @@ do_update() {
         systemctl restart awg-bot 2>/dev/null || true
         log "Бот обновлён и перезапущен"
     fi
-    [ "${LAYER3:-0}" = 1 ] && install_awg_go
+    if [ "${LAYER3:-0}" = 1 ]; then
+        install_awg_go
+        # Пересобранный бинарник не подхватывается сам: демон уже запущен из
+        # старого. Перезапускаем — короткий разрыв туннелей 3.0, но иначе
+        # обновление датапаса не имело бы смысла.
+        if [ "${AWG_GO_REBUILT:-0}" = 1 ]; then
+            log "Перезапуск слоя 3.0 на новом датапасе…"
+            systemctl restart "awg3@${IFACE3:-awg3}" || \
+                err "не удалось перезапустить awg3@${IFACE3:-awg3}"
+        fi
+    fi
     log "✅ Готово. Выданные клиенты работают как раньше."
 }
 
