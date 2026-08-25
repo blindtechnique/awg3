@@ -465,6 +465,11 @@ deploy_files() {
     mkdir -p "$DEST" "$CLIENT_DIR" "$AWG_DIR"
     cp "$REPO_DIR"/bin/*.sh "$REPO_DIR"/bin/*.py "$DEST/"
     cp "$REPO_DIR"/obfuscation/*.py "$DEST/"
+    # Сам установщик тоже кладём рядом: меню awg3 зовёт "$DEST/install.sh" для
+    # удаления слоя и установки бота (bin/awg-menu.sh:280,282,320). Без этого
+    # файла пункты 3, 4 и 13 всегда уходили в фолбэк, причём третий печатал
+    # команду с пустым URL — его он берёт из $DEST/.url, которого тоже не было.
+    cp "$REPO_DIR/install.sh" "$DEST/"
     chmod +x "$DEST"/*.sh "$DEST"/*.py
     chmod 700 "$AWG_DIR"
 
@@ -475,6 +480,9 @@ deploy_files() {
     ln -sf "$DEST/awg-obfuscation.sh" /usr/local/bin/awg-obfuscation
     ln -sf "$DEST/awg-backup.sh"      /usr/local/bin/awg-backup
     ln -sf "$DEST/awg-doctor.sh"      /usr/local/bin/awg-doctor
+    # README обещает команду awg-upstream-check, и бот зовёт этот скрипт полным
+    # путём — а в PATH его не было вовсе.
+    ln -sf "$DEST/awg-upstream-check.sh" /usr/local/bin/awg-upstream-check
 
     cp "$REPO_DIR/systemd/awg3@.service" /etc/systemd/system/
     cp "$REPO_DIR/systemd/awg-stats.service" "$REPO_DIR/systemd/awg-stats.timer" \
@@ -486,6 +494,9 @@ deploy_files() {
     ( rev="$(git -C "$REPO_DIR" rev-parse --short=12 HEAD 2>/dev/null)"
       [ -n "$rev" ] && echo "$rev" > "$DEST/.rev" ) 2>/dev/null || true
     echo "$REPO_BRANCH" > "$DEST/.branch"
+    # URL, из которого ставились: меню подставляет его в подсказку, когда
+    # установщика нет рядом.
+    echo "$REPO_URL/raw/$REPO_BRANCH/install.sh" > "$DEST/.url"
 }
 
 # ── внешний адрес ────────────────────────────────────────────────────────────
@@ -905,9 +916,12 @@ uninstall_all() {
     done
 
     rm -f /usr/local/bin/awg3 /usr/local/bin/awg-client /usr/local/bin/awg-obfuscation \
-          /usr/local/bin/awg-backup /usr/local/bin/awg-doctor
+          /usr/local/bin/awg-backup /usr/local/bin/awg-doctor /usr/local/bin/awg-upstream-check
     rm -rf "$DEST" "$AWG_DIR" "$SRC/amneziawg-go" "$SRC/amneziawg-tools" \
            "$SRC/amneziawg-linux-kernel-module"
+    # Метку ревизии модуля тоже сносим: без неё rmdir "$SRC" ниже упирался в
+    # непустой каталог и тихо отваливался, оставляя /opt/src навсегда.
+    rm -f "$KMOD_STAMP"
     # родительские каталоги убираем, только если они опустели: там может лежать
     # чужое (например другой продукт Amnezia)
     rmdir "$(dirname "$AWG_DIR")" "$SRC" 2>/dev/null || true
