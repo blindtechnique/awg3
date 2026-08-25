@@ -30,18 +30,24 @@ latest_tag() {  # latest_tag <owner/repo>
         | awk -F/ '{print $NF}' | grep -E '^v[0-9]' | sort -V | tail -1
 }
 
-# Готов ли kernel-модуль к 3.0. Проверяем не номер PR, а саму возможность:
-# есть ли в заголовке ветки master netlink-атрибут header protection. Как
-# только апстрим вольёт PR #192, ответ сменится сам, без правок скрипта.
+# Готов ли kernel-модуль принять слой 3.0.
+#
+# Раньше здесь искали в master netlink-атрибут header protection и по его
+# наличию печатали зелёное «можно переводить датапас в ядро». PR #192 влит,
+# атрибут в master есть с 30.07.2026 — и совет стал срабатывать всегда, толкая
+# владельца ровно туда, где открыты регрессии. Наличия атрибута мало: важно,
+# работает ли модуль. Поэтому теперь различаем 3.0 и 3.1 и не советуем переезд,
+# пока открыты issues. Ветку feat/awg3 не проверяем — она удалена апстримом.
 kmod3_state() {
     local url=https://raw.githubusercontent.com/amnezia-vpn/amneziawg-linux-kernel-module
-    if curl -fsS --max-time 15 "$url/master/src/uapi/wireguard.h" 2>/dev/null \
-         | grep -q WGDEVICE_A_HEADER_PROTECTION_KEY; then
-        echo master; return 0
+    local hdr
+    hdr="$(curl -fsS --max-time 15 "$url/master/src/uapi/wireguard.h" 2>/dev/null || true)"
+    [ -n "$hdr" ] || { echo unknown; return 0; }
+    if printf '%s' "$hdr" | grep -q WGDEVICE_A_RANDOM_TRAILERS; then
+        echo v31; return 0
     fi
-    if curl -fsS --max-time 15 "$url/feat/awg3/src/uapi/wireguard.h" 2>/dev/null \
-         | grep -q WGDEVICE_A_HEADER_PROTECTION_KEY; then
-        echo branch; return 0
+    if printf '%s' "$hdr" | grep -q WGDEVICE_A_HEADER_PROTECTION_KEY; then
+        echo v30; return 0
     fi
     echo unknown
 }
@@ -61,12 +67,26 @@ add_row() {  # add_row <что> <установлено> <доступно> <е�
     return 0
 }
 
+# Пины установщика. Держим их в согласии с install.sh — там же объяснено, почему
+# проект остаётся на серии 3.0 и не идёт на 3.1.
+#
+# Сравнивать установленное с ПОСЛЕДНИМ тегом апстрима нельзя: мы намеренно
+# пинуемся на 3.0, апстрим ушёл на 3.1, и «есть обновление» горело бы вечно —
+# бот слал бы уведомления, `--update` ничего бы не менял, и так по кругу.
+# Ровно этот класс бага уже числится исправленным для 1.0.1. Поэтому обновлением
+# считается расхождение с ПИНОМ, а свежий тег апстрима идёт отдельной справкой.
+PIN_GO="${AWG_GO_REF:-v3.0.20260805}"
+PIN_TOOLS="${AWG_TOOLS_REF:-v1.0.20260618-2}"
+UPSTREAM_NOTE=""
+
 # ── amneziawg-go: только если стоит слой 3.0 ────────────────────────────────
 if command -v amneziawg-go >/dev/null 2>&1; then
     cur="$(installed_go_ref)"; [ -n "$cur" ] || cur="(неизвестно)"
+    if [ "$cur" != "$PIN_GO" ]; then add_row "amneziawg-go" "$cur" "$PIN_GO" 1
+    else add_row "amneziawg-go" "$cur" "$PIN_GO" 0; fi
     new="$(latest_tag amnezia-vpn/amneziawg-go)"
-    if [ -n "$new" ] && [ "$new" != "$cur" ]; then add_row "amneziawg-go" "$cur" "$new" 1
-    else add_row "amneziawg-go" "$cur" "${new:-?}" 0; fi
+    [ -n "$new" ] && [ "$new" != "$PIN_GO" ] && \
+        UPSTREAM_NOTE="апстрим выпустил amneziawg-go $new (установщик пиннится на $PIN_GO)"
 fi
 
 # ── amneziawg-tools: ставится пакетом, сравниваем с тегом апстрима ──────────
@@ -74,11 +94,16 @@ if command -v awg >/dev/null 2>&1; then
     # ВАЖНО: суффикс «-2» — часть версии (v1.0.20260618-2). Без него в шаблоне
     # установленная версия обрезалась до v1.0.20260618 и не совпадала с тегом,
     # из-за чего скрипт вечно докладывал о несуществующем обновлении.
-    cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1)"
+    cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1 || true)"
     [ -n "$cur" ] || cur="(пакет)"
-    new="$(latest_tag amnezia-vpn/amneziawg-tools)"
-    if [ -n "$new" ] && [ "$new" != "$cur" ]; then add_row "amneziawg-tools" "$cur" "$new" 1
-    else add_row "amneziawg-tools" "$cur" "${new:-?}" 0; fi
+    if [ "$cur" != "$PIN_TOOLS" ]; then add_row "amneziawg-tools" "$cur" "$PIN_TOOLS" 1
+    else add_row "amneziawg-tools" "$cur" "$PIN_TOOLS" 0; fi
+fi
+
+# ── kernel-модуль: что реально собрано ──────────────────────────────────────
+if [ -f /opt/src/.amneziawg-kmod.ref ]; then
+    cur="$(cut -f1 /opt/src/.amneziawg-kmod.ref 2>/dev/null || true)"
+    add_row "kernel-модуль" "${cur:-неизвестно}" "${cur:-—}" 0
 fi
 
 # ── код слоя ────────────────────────────────────────────────────────────────
@@ -124,26 +149,24 @@ elif [ "$QUIET" = 0 ]; then
 
     # Отдельной строкой — не обновление, а смена возможностей апстрима.
     case "$KMOD3_STATE" in
-        master)
+        v30|v31)
             echo
-            if [ "${KMOD3:-0}" = 1 ]; then
-                echo "Слой 3.0 в ядре: поддержка доехала до master — можно снять пометку"
-                echo "«экспериментально» и перейти на релизные версии."
-            else
-                echo "🟢 Слой 3.0 появился в kernel-модуле апстрима (master)."
-                echo "   Датапас 3.0 можно перевести с userspace на ядро — это быстрее."
-                echo "   Клиентов перевыпускать не нужно: параметры и ключи те же."
-            fi ;;
-        branch)
-            echo
-            if [ "${KMOD3:-0}" = 1 ]; then
-                echo "Режим --kmod3: модуль и утилиты собраны из ветки feat/awg3."
-                echo "Она ещё не влита в master и меняется часто — следи за обновлениями."
-            else
-                echo "Слой 3.0 в ядре пока готовится (ветка feat/awg3, PR #192)."
-                echo "Сейчас 3.0 работает через userspace-датапас — это штатный режим."
-            fi ;;
+            echo "Слой 3.0 в kernel-модуле апстрима есть (PR #192 влит 30.07.2026),"
+            echo "но переезд датапаса с userspace на ядро ОТЛОЖЕН:"
+            echo "  • kmod issue #215 — регрессия 3.0→3.1: хендшейк проходит, трафика нет;"
+            echo "  • amnezia-client issue #3043 — то же самое, причём и на userspace 3.1,"
+            echo "    и на kernel-модуле 3.1 одинаково."
+            echo "Обе открыты без ответа мейнтейнеров. Чистого тега модуля сейчас нет:"
+            echo "в v3.0.20260805 use-after-free в send.c, а фикс попал только в v3.1."
+            [ "$KMOD3_STATE" = v31 ] && \
+                echo "В master уже 3.1 (RandomTrailers, DisableCookies) — тем более не берём."
+            echo "Сейчас 3.0 работает через userspace-датапас, и это штатный режим." ;;
     esac
+    if [ -n "${UPSTREAM_NOTE:-}" ]; then
+        echo
+        echo "ℹ️  $UPSTREAM_NOTE"
+        echo "   Это справка, а не повод обновляться: пин меняется вместе с кодом awg3."
+    fi
 fi
 
 [ "$UPDATES" -gt 0 ] && exit 10

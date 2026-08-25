@@ -111,7 +111,7 @@ if [ "$LAYER3" = 1 ]; then
              /opt/src/amneziawg-linux-kernel-module/src/uapi/wireguard.h 2>/dev/null; then
             ok "модуль собран из ветки с поддержкой 3.0"
         else
-            bad "модуль без поддержки 3.0 — переустанови с --kmod3"
+            bad "модуль без поддержки 3.0. Флаг --kmod3 отключён (см. install.sh); слой 3.0 обслуживает userspace-датапас amneziawg-go"
         fi
     else
         head_ "Слой AmneziaWG 3.0 (userspace)"
@@ -132,7 +132,7 @@ if [ "$LAYER3" = 1 ]; then
             if awg setconf "$probe" "$probe_conf" 2>/dev/null; then
                 ok "модуль принимает PersistentKeepalive"
             else
-                bad "модуль отвергает PersistentKeepalive — клиенты не подключатся. Это баг ветки feat/awg3 (netlink: NLA_U64 против u32). Вернись в штатный режим: install.sh --update без --kmod3"
+                bad "модуль отвергает PersistentKeepalive — клиенты не подключатся. Утилиты и модуль разошлись по версиям: bash install.sh (полный прогон, профиль обфускации не меняется)"
             fi
             rm -f "$probe_conf"
             ip link del "$probe" 2>/dev/null

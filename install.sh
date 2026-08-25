@@ -14,9 +14,12 @@
 # Слои независимы: свои интерфейсы, порты и профили обфускации. Можно поднять
 # любой из них или оба сразу и выдавать клиентам то, что понимает их приложение.
 #
-# Почему 3.0 не на модуле: kernel-модуль знает параметры только до 2.0, а
-# awg-quick молча уходит в него, если модуль загружен. Поэтому датапас 3.0
-# запускается явно через amneziawg-go.
+# Почему 3.0 не на модуле: параметры 3.0 kernel-модуль уже знает — апстрим влил
+# их в master 30.07.2026 (PR #192). Но переезд отложен: на модуле 3.1 открыты
+# регрессии #215 и amnezia-client #3043 — «хендшейк проходит, трафика нет»,
+# причём и на ядре, и на userspace одинаково. Чистого тега модуля сейчас нет:
+# в v3.0.20260805 use-after-free в send.c, а фикс попал только внутрь v3.1.
+# Поэтому датапас 3.0 по-прежнему запускается явно через amneziawg-go.
 #
 # Флаги:
 #   --awg 2|3|both    какие версии поднять (по умолчанию спросит)
@@ -32,11 +35,18 @@
 #   --reconfigure     новый профиль обфускации (клиентам нужны новые конфиги)
 #   --uninstall       удалить всё, что поставил этот скрипт
 #   --yes             не переспрашивать (для автоматизации)
-#   --no-kmod3        вернуть слой 3.0 на userspace-датапас (штатный режим)
-#   --kmod3           ЭКСПЕРИМЕНТ: слой 3.0 на kernel-модуле вместо userspace.
-#                     Собирает модуль и утилиты из ветки feat/awg3 апстрима —
-#                     она не влита в master и правится почти ежедневно.
-#                     Быстрее, но ломается вместе с апстримом. См. README.
+#   --kmod3 / --no-kmod3   ОТКЛЮЧЕНЫ, выходят с кодом 2. Ветка feat/awg3
+#                     удалена апстримом, а переезд слоя 3.0 в ядро отложен
+#                     до закрытия регрессий (см. выше).
+#
+# Переменные окружения: AWG_GO_REF, AWG_TOOLS_REF, AWG_KMOD_SRC_REF, AWG_KMOD_REF
+# переопределяют версии апстрима. AWG_KMOD_REF пуст по умолчанию: собранный
+# kernel-модуль не трогается, пересборка только по явному указанию ревизии.
+#
+# ВНИМАНИЕ: через --update доезжает ТОЛЬКО AWG_GO_REF — do_update пересобирает
+# один датапас и не вызывает ни install_tools, ни install_kmod. Утилиты и модуль
+# меняются полным прогоном установщика (обфускация и клиенты при этом не
+# трогаются, если не передан --reconfigure).
 #
 # Без флагов на уже установленном сервере открывается меню.
 set -euo pipefail
@@ -50,13 +60,35 @@ SERVICES="$AWG_DIR/services.env"
 CLIENT_DIR="$DEST/clients"
 
 # версии апстрима (переопределяются переменными окружения)
-AWG_GO_REF="${AWG_GO_REF:-v3.0.2}"
+#
+# amneziawg-go: v3.0.20260805 — последний тег серии 3.0. Относительно v3.0.2 это
+# пять коммитов, из датапаса тронуты receive.go (1 строка) и send.go (10), там же
+# фикс «keepalives are ignored». На 3.1 сознательно НЕ идём: kmod issue #215 и
+# amnezia-client issue #3043 — обе «хендшейк проходит, трафика нет», обе открыты
+# без ответа мейнтейнеров, и #3043 прямо сообщает, что userspace 3.1 и
+# kernel-модуль 3.1 ведут себя одинаково.
+AWG_GO_REF="${AWG_GO_REF:-v3.0.20260805}"
 AWG_TOOLS_REF="${AWG_TOOLS_REF:-v1.0.20260618-2}"
 GO_VER="${GO_VER:-1.24.4}"
 SRC=/opt/src
-# Ветка апстрима, где 3.0 делается для ядра (PR #192, в master не влито).
-# Используется только в экспериментальном режиме --kmod3.
-AWG3_KMOD_BRANCH="${AWG3_KMOD_BRANCH:-feat/awg3}"
+# Kernel-модуль: две РАЗНЫЕ переменные, и путать их нельзя.
+#
+# AWG_KMOD_SRC_REF — что клонировать, когда собирать всё-таки надо (чистая
+# установка, обновление ядра). Пин обязателен: раньше клонировали без --branch,
+# то есть master, а master с 30.07.2026 — это 3.1 с открытой регрессией #215
+# («хендшейк проходит, трафика нет»), которая задевает и слой 2.0.
+# Берём последний тег серии 3.0. Честно про цену: в нём есть use-after-free в
+# send.c (is_keepalive читается после передачи буфера в UDP-стек, коммит
+# ce16310), исправленный только внутри v3.1.20260812 — то есть чистого тега у
+# апстрима сейчас нет вообще, и мы выбираем узкую гонку вместо гарантированной
+# остановки трафика.
+#
+# AWG_KMOD_REF — принудительная пересборка на указанную ревизию. ПУСТО по
+# умолчанию: уже собранный модуль не трогаем, даже если пин изменился. Так
+# обновление кода установщика не утаскивает за собой датапас слоя 2.0.
+AWG_KMOD_SRC_REF="${AWG_KMOD_SRC_REF:-v3.0.20260805}"
+AWG_KMOD_REF="${AWG_KMOD_REF:-}"
+KMOD_STAMP="$SRC/.amneziawg-kmod.ref"
 KMOD3=0; KMOD3_OFF=0; MODE_SWITCH=0
 
 NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0
@@ -104,8 +136,21 @@ while [ $# -gt 0 ]; do
         --reconfigure) RECONFIGURE=1; shift ;;
         --uninstall)  UNINSTALL=1; shift ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
-        --kmod3)      KMOD3=1; MODE_SWITCH=1; shift ;;
-        --no-kmod3)   KMOD3=0; KMOD3_OFF=1; MODE_SWITCH=1; shift ;;
+        # Режим отключён намеренно. Ветка feat/awg3 удалена апстримом после
+        # мержа PR #192, и --kmod3 не просто падал на клонировании: сначала
+        # срабатывал безпиновый фолбэк в install_tools и ставились утилиты из
+        # master (сегодня это 3.1), затем гасились интерфейсы и делался rmmod,
+        # и только потом всё обрывалось. На выходе — новые утилиты против
+        # старого модуля, тот самый рассинхрон, ради которого ниже написано
+        # предупреждение про зависание в D-состоянии.
+        # echo, а не err(): цикл разбора аргументов выполняется ДО определения
+        # log/err ниже по файлу — ровно поэтому и ветка «неизвестный флаг»
+        # написана через echo.
+        --kmod3|--no-kmod3)
+            echo "$1 отключён: ветка feat/awg3 удалена апстримом (влита в master, PR #192)." >&2
+            echo "Перевод слоя 3.0 в ядро отложен — kernel-модуль issue #215 и" >&2
+            echo "amnezia-client issue #3043: хендшейк проходит, трафика нет." >&2
+            exit 2 ;;
         -h|--help)    grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Неизвестный флаг: $1" >&2; exit 2 ;;
     esac
@@ -228,49 +273,43 @@ install_go() {
 # amneziawg-tools нужны обоим слоям: ими читается состояние интерфейса и
 # применяется конфиг (для 3.0 — всё, кроме собственно параметров 3.0).
 install_tools() {
-    # В режиме --kmod3 нужны утилиты, понимающие параметры 3.0 в конфиге, —
-    # они пока только в ветке. Тег в этом случае не используем.
     local ref="$AWG_TOOLS_REF"
-    [ "$KMOD3" = 1 ] && ref="$AWG3_KMOD_BRANCH"
-
-    # Собранное из ветки и собранное из тега сообщают ОДНУ И ТУ ЖЕ версию, так
-    # что по `awg --version` их не различить. Смотрим на исходники: есть ли в
-    # них поддержка 3.0. Если она не совпадает с запрошенным режимом — пересборка.
-    local src_has_v3=0
-    grep -qs HeaderProtectionKey "$SRC/amneziawg-tools/src/config.c" 2>/dev/null && src_has_v3=1
-    if [ "$src_has_v3" != "$KMOD3" ] && [ -d "$SRC/amneziawg-tools" ]; then
-        log "amneziawg-tools собраны не под текущий режим — пересборка из $ref"
-        rm -rf "$SRC/amneziawg-tools"
-    fi
 
     if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1 \
        && [ -d "$SRC/amneziawg-tools" ]; then
-        if [ "$KMOD3" = 1 ]; then
-            # у ветки нет версии — сверяем ревизию исходников
-            local cur_rev want_rev
-            cur_rev="$(git -C "$SRC/amneziawg-tools" rev-parse --short HEAD 2>/dev/null || true)"
-            want_rev="$(git ls-remote https://github.com/amnezia-vpn/amneziawg-tools.git \
-                        "refs/heads/$ref" 2>/dev/null | cut -c1-7)"
-            if [ -n "$cur_rev" ] && [ "$cur_rev" = "$want_rev" ]; then
-                log "amneziawg-tools ($ref, $cur_rev) — актуальны"
-                return 0
-            fi
+        # Одной строки версии мало: собранное из ветки и собранное из тега
+        # сообщают ОДНУ И ТУ ЖЕ версию, по `awg --version` их не различить.
+        # Поэтому дополнительно спрашиваем у чекаута, из какой ревизии он сделан.
+        # Без этой сверки утилиты, однажды собранные из ветки, уже никогда не
+        # вернулись бы на пиновый тег — а это тот самый рассинхрон с модулем.
+        local cur cur_ref
+        # Суффикс «-2» — часть версии (v1.0.20260618-2), в шаблон он включён
+        # `|| true` обязателен: под set -o pipefail grep без совпадения возвращает
+        # 1, pipefail протаскивает это через пайплайн, и set -e убивает скрипт
+        # прямо здесь — без единой строки в выводе. Ветка «${cur:-?}» ниже как
+        # раз рассчитана на пустое значение, но без этой заплаты недостижима.
+        cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1 || true)"
+        cur_ref="$(git -C "$SRC/amneziawg-tools" describe --tags --exact-match 2>/dev/null || true)"
+        if [ "$cur" = "$AWG_TOOLS_REF" ] && [ "$cur_ref" = "$AWG_TOOLS_REF" ]; then
+            log "amneziawg-tools $cur — актуальны"
+            return 0
+        fi
+        if [ "$cur" = "$AWG_TOOLS_REF" ] && [ -n "$cur_ref" ]; then
+            log "amneziawg-tools версии $cur, но собраны из $cur_ref → $AWG_TOOLS_REF: пересборка…"
         else
-            # Суффикс «-2» — часть версии (v1.0.20260618-2), в шаблон он включён
-            local cur; cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1)"
-            if [ "$cur" = "$AWG_TOOLS_REF" ]; then
-                log "amneziawg-tools $cur — актуальны"
-                return 0
-            fi
             log "amneziawg-tools ${cur:-?} → $AWG_TOOLS_REF: пересборка…"
         fi
     fi
     log "amneziawg-tools ($ref): сборка из исходников…"
     mkdir -p "$SRC"
     rm -rf "$SRC/amneziawg-tools"
+    # Фолбэка «клонировать без --branch» здесь НЕТ намеренно: он обесценивал пин
+    # и при недоступности тега тихо ставил master. Сегодня master — это 3.1, а
+    # утилиты обязаны быть протокольно совместимы с модулем, иначе awg не
+    # ошибается, а виснет намертво. Лучше честный отказ, чем такая подмена.
     git clone --quiet --depth 1 --branch "$ref" \
-        https://github.com/amnezia-vpn/amneziawg-tools.git "$SRC/amneziawg-tools" 2>/dev/null || \
-        git clone --quiet --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git "$SRC/amneziawg-tools"
+        https://github.com/amnezia-vpn/amneziawg-tools.git "$SRC/amneziawg-tools" || {
+        err "не удалось получить amneziawg-tools @ $ref"; return 1; }
     make -s -C "$SRC/amneziawg-tools/src" -j"$(nproc)" >/dev/null
     make -s -C "$SRC/amneziawg-tools/src" install >/dev/null
     command -v awg >/dev/null || { err "awg не собрался"; return 1; }
@@ -279,72 +318,108 @@ install_tools() {
 
 # kernel-модуль нужен только слою 2.0
 install_kmod() {
-    local want_branch=""
-    [ "$KMOD3" = 1 ] && want_branch="$AWG3_KMOD_BRANCH"
+    local want="$AWG_KMOD_REF" have=""
+    [ -f "$KMOD_STAMP" ] && have="$(cut -f1 "$KMOD_STAMP" 2>/dev/null || true)"
 
-    # Смена версии модуля на живой системе опасна: пока он загружен, утилиты
-    # и модуль обязаны быть из одного набора. Поэтому сначала выясняем, нужна
-    # ли смена вообще, и только потом трогаем что-либо.
+    # «Нужна ли пересборка» решаем по метке ревизии, которую пишем сами. Раньше
+    # здесь стоял греп по исходникам на диске: искали WGDEVICE_A_HEADER_PROTECTION_KEY
+    # и сравнивали результат с режимом. После влития PR #192 в master атрибут есть
+    # ВСЕГДА, поэтому проверка «режим не совпал» стала вечно истинной — модуль
+    # пересобирался на каждом запуске, каждый раз с rmmod и выходом «перезагрузи
+    # сервер». Метка от исходников не зависит и врать не умеет.
     #
-    # Собранный модуль о своей ветке не рассказывает — смотрим исходники.
-    # Режим и модуль должны совпадать в обе стороны: ветка нужна для --kmod3,
-    # а при возврате в штатный режим её нужно сменить обратно на master —
-    # иначе на сервере остаётся код с недоделанным netlink.
-    local kmod_has_v3=0
-    grep -qs WGDEVICE_A_HEADER_PROTECTION_KEY \
-        "$SRC/amneziawg-linux-kernel-module/src/uapi/wireguard.h" 2>/dev/null && kmod_has_v3=1
-
-    if modinfo amneziawg >/dev/null 2>&1; then
-        if [ "$kmod_has_v3" != "$KMOD3" ]; then
-            if [ "$KMOD3" = 1 ]; then
-                log "kernel-модуль без поддержки 3.0 — пересобираю из ветки $want_branch"
-            else
-                log "kernel-модуль из ветки feat/awg3 — возвращаю релизный из master"
-            fi
-        else
-            log "kernel-модуль amneziawg уже собран"
-            modprobe amneziawg 2>/dev/null || true
-            return 0
+    # Пустой AWG_KMOD_REF означает «не трогать собранный модуль»: чистого тега
+    # у апстрима сейчас нет (см. комментарий к AWG_KMOD_REF выше).
+    if modinfo amneziawg >/dev/null 2>&1 && { [ -z "$want" ] || [ "$want" = "$have" ]; }; then
+        # Сервер со сборкой от прошлых версий установщика метки не имеет, и сама
+        # она бы не появилась никогда: этот ранний выход её не писал. Тогда
+        # первый же осознанный пин на ТУ ЖЕ ревизию давал have="" != want и вёл
+        # к пересборке с гашением интерфейсов на ровном месте. Проставляем задним
+        # числом по тому, что реально лежит в исходниках.
+        if [ -z "$have" ] && [ -d "$SRC/amneziawg-linux-kernel-module/.git" ]; then
+            printf '%s\t%s\t%s\n' \
+                "$(git -C "$SRC/amneziawg-linux-kernel-module" describe --tags --exact-match 2>/dev/null || echo 'неизвестно')" \
+                "$(git -C "$SRC/amneziawg-linux-kernel-module" rev-parse --short HEAD 2>/dev/null || echo '?')" \
+                "$(uname -r)" > "$KMOD_STAMP" 2>/dev/null || true
+            have="$(cut -f1 "$KMOD_STAMP" 2>/dev/null || true)"
         fi
+        log "kernel-модуль amneziawg уже собран (${have:-ревизия не помечена}) — не трогаю"
+        modprobe amneziawg 2>/dev/null || true
+        return 0
     fi
-    log "kernel-модуль amneziawg${want_branch:+ ($want_branch)}: сборка DKMS…"
+    log "kernel-модуль amneziawg${want:+ ($want)}: сборка DKMS…"
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y -qq dkms "linux-headers-$(uname -r)" build-essential >/dev/null 2>&1 || true
+    [ -d "/lib/modules/$(uname -r)/build" ] || {
+        err "нет заголовков ядра для $(uname -r) — собирать модуль нечем"
+        err "apt-get install linux-headers-\$(uname -r)"
+        return 1; }
     mkdir -p "$SRC"
     rm -rf "$SRC/amneziawg-linux-kernel-module"
-    git clone --quiet --depth 1 ${want_branch:+--branch "$want_branch"} \
+    # --branch задаём ВСЕГДА. При пустом want подстановка ${want:+…} исчезала
+    # целиком, и клонировался master — то есть ровно 3.1, которую этот же файл
+    # объявляет негодной. Пустой AWG_KMOD_REF означает «не пересобирать», а не
+    # «собрать что попало»: если сборка всё же нужна, берём пин AWG_KMOD_SRC_REF.
+    local src_ref="${want:-$AWG_KMOD_SRC_REF}"
+    git clone --quiet --depth 1 --branch "$src_ref" \
         https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git \
-        "$SRC/amneziawg-linux-kernel-module"
+        "$SRC/amneziawg-linux-kernel-module" || {
+        err "не удалось получить kernel-модуль @ $src_ref"; return 1; }
 
-    # Модуль нельзя подменить «на живую»: пока существует хоть один интерфейс,
-    # rmmod не сработает, в памяти останется прежняя версия — и она разойдётся
-    # с только что пересобранными утилитами (разный формат netlink). Поэтому
-    # гасим свои интерфейсы, выгружаем модуль и поднимаем всё заново ниже.
+    # КОМПИЛИРУЕМ ДО того, как что-либо гасим. Раньше интерфейсы опускались и
+    # делался rmmod ещё до make, и любой отказ сборки (GCC 14, свежее ядро,
+    # отсутствие заголовков) оставлял слой 2.0 лежать, а систему — без модуля.
+    make -s -C "$SRC/amneziawg-linux-kernel-module/src" >/dev/null || {
+        err "модуль не собрался — интерфейсы не трогаю, слой 2.0 продолжает работать"
+        return 1
+    }
+
+    # Только теперь подменяем: пока модуль загружен, rmmod не сработает при живом
+    # интерфейсе, а в памяти останется прежняя версия — и разойдётся с утилитами
+    # (разный формат netlink). Тогда awg не просто ошибётся, а зависнет в
+    # непрерываемом ожидании (процессы в состоянии D, счётчик ссылок ломается).
     if lsmod 2>/dev/null | grep -q '^amneziawg'; then
         local i
         for i in "${IFACE2:-awg2}" "${IFACE3:-awg3}"; do
             systemctl stop "awg-quick@$i" "awg3@$i" 2>/dev/null || true
             ip link del "$i" 2>/dev/null || true
         done
-        if ! rmmod amneziawg 2>/dev/null; then
-            # Дальше идти нельзя. Утилиты будут пересобраны под новую версию
-            # модуля, а в памяти останется старая — их netlink-форматы разойдутся,
-            # и `awg` не просто ошибётся, а зависнет в непрерываемом ожидании
-            # (процессы в состоянии D, счётчик ссылок модуля ломается). Спасает
-            # только перезагрузка, поэтому просим её сразу.
+        # ip link del освобождает netdev асинхронно — сразу следом rmmod иногда
+        # даёт EBUSY на ровном месте. Гнать администратора в reboot из-за гонки
+        # в доли секунды дорого, поэтому несколько попыток.
+        local n rmmod_ok=0
+        for n in 1 2 3 4 5; do
+            rmmod amneziawg 2>/dev/null && { rmmod_ok=1; break; }
+            sleep 1
+        done
+        if [ "$rmmod_ok" != 1 ]; then
+            # Именно exit, а не return. Функция вызывается как `install_kmod || {…}`,
+            # то есть set -e внутри неё подавлен, и return 1 отдал бы управление
+            # обработчику, который просто снимает слой 2.0 и идёт дальше. А идти
+            # дальше нельзя: интерфейсы уже погашены выше, install_tools уже мог
+            # пересобрать утилиты, и в памяти остался прежний модуль — подниматься
+            # на такой паре нельзя, awg зависнет в непрерываемом ожидании.
             err "модуль amneziawg не выгружается — что-то держит его."
+            err "Интерфейсы ${IFACE2:-awg2}/${IFACE3:-awg3} уже погашены, новый модуль НЕ установлен."
+            err "Утилиты могли быть пересобраны — продолжать нельзя."
             err "Перезагрузи сервер и запусти установку снова:  reboot"
             exit 1
         fi
     fi
-    ( cd "$SRC/amneziawg-linux-kernel-module/src" && make -s >/dev/null && make -s install >/dev/null ) || {
-        err "модуль не собрался — слой 2.0 недоступен"
+    make -s -C "$SRC/amneziawg-linux-kernel-module/src" install >/dev/null || {
+        err "установка модуля не удалась — слой 2.0 недоступен"
         return 1
     }
     depmod -a || true
     modprobe amneziawg 2>/dev/null || true
     modinfo amneziawg >/dev/null 2>&1 || { err "модуль не загружается"; return 1; }
-    log "kernel-модуль amneziawg готов"
+    # В метку пишем ФАКТ, а не запрошенное: ревизию, из которой собрано, её SHA
+    # и ядро, под которое собрано. Раньше сюда уходило пустое $want, и лог всегда
+    # печатал «ревизия не помечена» — узнать, из какого кода собран .ko, было негде.
+    printf '%s\t%s\t%s\n' "$src_ref" \
+        "$(git -C "$SRC/amneziawg-linux-kernel-module" rev-parse --short HEAD 2>/dev/null || echo '?')" \
+        "$(uname -r)" > "$KMOD_STAMP"
+    log "kernel-модуль amneziawg готов ($src_ref)"
 }
 
 # userspace-датапас нужен слою 3.0
@@ -353,7 +428,9 @@ install_awg_go() {
     # неё --update никогда не подтягивал новую версию датапаса: проверка
     # обновлений сообщала о ней, а обновление ничего не делало.
     if command -v amneziawg-go >/dev/null 2>&1; then
-        local cur; cur="$(amneziawg-go --version 2>&1 | grep -oE 'v[0-9][0-9.]*' | head -1)"
+        # `|| true` — см. пояснение в install_tools: без него grep без совпадения
+        # обрывает установку молча.
+        local cur; cur="$(amneziawg-go --version 2>&1 | grep -oE 'v[0-9][0-9.]*' | head -1 || true)"
         if [ "$cur" = "$AWG_GO_REF" ]; then
             log "amneziawg-go $cur — актуален"
             return 0
@@ -365,9 +442,13 @@ install_awg_go() {
     log "amneziawg-go ($AWG_GO_REF): сборка из исходников…"
     mkdir -p "$SRC"
     rm -rf "$SRC/amneziawg-go"
+    # Как и у tools, фолбэка без пина здесь нет. Для go он вреден вдвойне: без
+    # тега git describe в Makefile не срабатывает, и бинарник сообщает
+    # закоммиченную const Version — то есть `cur` никогда не совпадёт с
+    # AWG_GO_REF, и каждый --update будет пересобирать датапас и дёргать awg3@.
     git clone --quiet --depth 1 --branch "$AWG_GO_REF" \
-        https://github.com/amnezia-vpn/amneziawg-go.git "$SRC/amneziawg-go" 2>/dev/null || \
-        git clone --quiet --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git "$SRC/amneziawg-go"
+        https://github.com/amnezia-vpn/amneziawg-go.git "$SRC/amneziawg-go" || {
+        err "не удалось получить amneziawg-go @ $AWG_GO_REF"; return 1; }
     ( cd "$SRC/amneziawg-go" && make -s >/dev/null )
     install -m0755 "$SRC/amneziawg-go/amneziawg-go" /usr/local/bin/amneziawg-go
     command -v amneziawg-go >/dev/null || { err "amneziawg-go не собрался"; return 1; }
@@ -446,13 +527,16 @@ resolve_endpoint() {
 plan_services() {
     # порты закрепляются навсегда: от них зависят все выданные конфиги
     if installed; then
-        local cli_kmod3="$KMOD3"
         # shellcheck disable=SC1090
         . "$SERVICES"
-        # флаг из командной строки сильнее сохранённого: так включают и
-        # выключают экспериментальный режим на уже работающем сервере
-        [ "$cli_kmod3" = 1 ] && KMOD3=1
-        [ "$KMOD3_OFF" = 1 ] && KMOD3=0
+        # Режим --kmod3 отключён, поэтому сохранённое KMOD3='1' на сервере, где
+        # его когда-то успели включить, здесь принудительно гасится: иначе слой
+        # 3.0 остался бы ждать kernel-датапас, которого мы больше не ставим, и
+        # install_awg_go не вызвался бы вовсе.
+        if [ "${KMOD3:-0}" = 1 ]; then
+            log "в $SERVICES остался KMOD3=1 от отключённого режима — возвращаю слой 3.0 на userspace"
+        fi
+        KMOD3=0
         log "Параметры из $SERVICES (порты и подсети не меняются)"
         return 0
     fi
@@ -587,21 +671,32 @@ build_interfaces() {
 # ── обфускация ───────────────────────────────────────────────────────────────
 gen_obfuscation() {
     local P="${AWG_PRESET:-medium}" T="${AWG_TEMPLATE:-}" F="${AWG_FP:-chrome}"
-    # Смена датапаса — не повод менять параметры обфускации: у уже выданных
-    # клиентов они прописаны в конфигах. Профиль просто раскладываем заново.
-    local mode=--apply
-    [ "$MODE_SWITCH" = 1 ] && [ "$RECONFIGURE" != 1 ] && [ -s "$AWG_DIR/obfuscation.env" ] && mode=--reapply
+    # Новый профиль генерируем ТОЛЬКО по явному --reconfigure. Во всех прочих
+    # случаях он уже согласован с выданными клиентами и его достаточно разложить
+    # заново.
+    #
+    # Раньше --reapply включался лишь при MODE_SWITCH=1, то есть только вместе с
+    # --kmod3/--no-kmod3. Любой другой неинтерактивный полный прогон — cron,
+    # ansible, `ssh host 'bash -s' < install.sh` — уходил в --apply, генерировал
+    # новый случайный профиль и убивал все выданные конфиги разом.
+    #
+    # Файл проверяем ДЛЯ КАЖДОГО СЛОЯ отдельно: профили у них разные
+    # (obfuscation.env и obfuscation3.env), и общая проверка по первому
+    # перевыпускала клиентов слоя 3.0 на установке, где стоит только он.
+    local mode2=--apply mode3=--apply
+    [ "$RECONFIGURE" != 1 ] && [ -s "$AWG_DIR/obfuscation.env"  ] && mode2=--reapply
+    [ "$RECONFIGURE" != 1 ] && [ -s "$AWG_DIR/obfuscation3.env" ] && mode3=--reapply
     if [ "$LAYER2" = 1 ]; then
         log "Профиль обфускации 2.0: preset=$P template=${T:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE2}.conf" "$DEST/awg-obfuscation.sh" \
             --preset "$P" ${T:+--template "$T"} --fp "$F" --mtu "$MTU2" \
-            ${ENDPOINT:+--host "$ENDPOINT"} "$mode"
+            ${ENDPOINT:+--host "$ENDPOINT"} "$mode2"
     fi
     if [ "$LAYER3" = 1 ]; then
         log "Профиль обфускации 3.0: preset=$P template=${T:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE3}.conf" "$DEST/awg-obfuscation.sh" --v3 \
             --preset "$P" ${T:+--template "$T"} --fp "$F" --mtu "$MTU3" \
-            ${ENDPOINT:+--host "$ENDPOINT"} "$mode"
+            ${ENDPOINT:+--host "$ENDPOINT"} "$mode3"
     fi
 }
 
@@ -890,6 +985,19 @@ main() {
     ask_params
     # shellcheck disable=SC1090
     . "$STATE"
+    ENDPOINT="${AWG_ENDPOINT:-$ENDPOINT}"
+    # plan_services обязан отработать ДО сборки по двум причинам. Во-первых,
+    # оттуда приезжают настоящие имена интерфейсов: install_kmod гасит их перед
+    # rmmod, и с дефолтными awg2/awg3 на сервере с другими именами он погасил бы
+    # не то, а rmmod упёрся бы в живой интерфейс. Во-вторых, раньше он стоял
+    # ПОСЛЕ install_kmod и сорсил services.env поверх LAYER2, которую обработчик
+    # отказа сборки только что выставил в 0, — решение «слой 2.0 не поднимаем»
+    # молча отменялось, и awg-quick@ стартовал против отсутствующего модуля.
+    plan_services
+
+    # Намерение сильнее сохранённого состояния: services.env описывает прошлую
+    # установку, а AWG_VER — то, что запрошено сейчас. Иначе одна неудачная
+    # сборка, записанная в services.env как LAYER2=0, осталась бы там навсегда.
     case "$AWG_VER" in
         2)    LAYER2=1; LAYER3=0 ;;
         3)    LAYER2=0; LAYER3=1 ;;
@@ -897,20 +1005,15 @@ main() {
     esac
 
     install_tools
-    # В режиме --kmod3 модуль нужен обоим слоям: он же обслуживает и 3.0
-    if [ "$LAYER2" = 1 ] || [ "$KMOD3" = 1 ]; then
+    if [ "$LAYER2" = 1 ]; then
         install_kmod || {
-            err "модуль не собрался"
-            [ "$KMOD3" = 1 ] && { err "режим --kmod3 без модуля невозможен"; exit 1; }
+            err "модуль не собрался — слой 2.0 в этом прогоне не поднимается"
             LAYER2=0
         }
     fi
-    # userspace-датапас нужен, только когда 3.0 живёт не в ядре
-    [ "$LAYER3" = 1 ] && [ "$KMOD3" = 0 ] && install_awg_go
+    [ "$LAYER3" = 1 ] && install_awg_go
     [ "$LAYER2" = 0 ] && [ "$LAYER3" = 0 ] && { err "ни один слой не поднялся"; exit 1; }
 
-    ENDPOINT="${AWG_ENDPOINT:-$ENDPOINT}"
-    plan_services
     deploy_files
     write_services
     build_interfaces
