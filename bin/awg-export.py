@@ -175,6 +175,14 @@ def build_amnezia_json(conf: dict, name: str) -> dict:
     dns_parts = [d.strip() for d in dns.split(",")]
     dns1 = dns_parts[0] if dns_parts else "1.1.1.1"
     dns2 = dns_parts[1] if len(dns_parts) > 1 else dns1
+    # ВНИМАНИЕ: до клиента этот MTU доезжает только через .conf-файл.
+    # При импорте ссылки vpn:// приложение его выбрасывает — importController.cpp,
+    # processAmneziaConfig() перезаписывает last_config["mtu"] значением
+    # protocols::awg::defaultMtu БЕЗУСЛОВНО, не глядя, задано ли значение
+    # (проверено по тегу 5.0.1.5, строки 749-752). Это 1376 на десктопе и 1280
+    # на мобильных. Путь импорта .conf ведёт себя иначе и наш MTU уважает:
+    # там дефолт подставляется только при отсутствии поля (строки 594-600).
+    # Значение всё равно пишем: оно работает для .conf и для старых клиентов.
     mtu = conf["interface"].get("MTU", "1420")
 
     awg = conf["awg"]
