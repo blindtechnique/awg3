@@ -155,8 +155,11 @@ AllowedIPs = ${cip}/32
 EOF
 
     # QR (сырой conf) + ссылка vpn:// + QR ссылки
-    "$PY" "$EXPORT" "$conf" --name "${SVC}-${name}" --outdir "$outdir" --all >/dev/null 2>&1 || \
-        log "экспортёр отработал с замечаниями — .conf на месте"
+    # stderr НЕ глушим: экспортёр объясняет там, почему не собрался QR —
+    # «не влезает в QR» и «нет segno/qrcode» лечатся по-разному, а с 2>&1
+    # обе причины выглядели одинаково молча.
+    "$PY" "$EXPORT" "$conf" --name "${SVC}-${name}" --outdir "$outdir" --all >/dev/null || \
+        log "экспортёр отработал с замечаниями (см. выше) — .conf на месте"
 
     local note=""
     if [ -n "$ttl" ]; then
@@ -173,8 +176,17 @@ EOF
 
     log "клиент '$name' ($SVC)${note} создан:"
     log "  conf  : $conf"
-    log "  QR    : ${outdir}/${SVC}-${name}.png"
-    log "  vpn://: ${outdir}/${SVC}-${name}.vpn"
+    # Путь печатаем по факту наличия файла: QR может не собраться (конфиг не
+    # влезает либо нет segno/qrcode), и обещание несуществующего файла отправляет
+    # владельца искать его на диске вместо чтения предупреждения выше.
+    if [ -f "${outdir}/${SVC}-${name}.png" ]; then
+        log "  QR    : ${outdir}/${SVC}-${name}.png"
+    else
+        log "  QR    : (не создан — см. предупреждение экспортёра выше)"
+    fi
+    if [ -f "${outdir}/${SVC}-${name}.vpn" ]; then
+        log "  vpn://: ${outdir}/${SVC}-${name}.vpn"
+    fi
     echo "$conf"
 }
 
@@ -261,7 +273,8 @@ for line in txt:
 open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
 PY
             "$PY" "$EXPORT" "$conf" --name "${svc}-${name}" \
-                --outdir "$(dirname "$conf")" --all >/dev/null 2>&1 || true
+                --outdir "$(dirname "$conf")" --all >/dev/null \
+                || log "  QR не собран для $svc/$name (см. предупреждение выше)"
             log "пересоздан: $svc/$name"
         done
     done
