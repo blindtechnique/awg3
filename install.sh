@@ -347,7 +347,11 @@ install_kmod() {
         modprobe amneziawg 2>/dev/null || true
         return 0
     fi
-    log "kernel-модуль amneziawg${want:+ ($want)}: сборка DKMS…"
+    # Сообщение говорило «сборка DKMS», хотя ниже идёт обычный make + make install
+    # и dkms о модуле ничего не знает. Из-за этого диагностика советовала смотреть
+    # `dkms status`, который всегда пуст. Пакет dkms ставим дальше по инерции —
+    # он безвреден и пригодится, если сборку когда-нибудь переведут на него.
+    log "kernel-модуль amneziawg${want:+ ($want)}: сборка из исходников…"
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y -qq dkms "linux-headers-$(uname -r)" build-essential >/dev/null 2>&1 || true
     [ -d "/lib/modules/$(uname -r)/build" ] || {
