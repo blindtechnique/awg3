@@ -286,15 +286,46 @@ if [ "$APPLY" = 1 ]; then
     # их применяет awg-datapath.sh через UAPI-сокет уже после старта.
     # В режиме ядра слой 3.0 поднимает тот же awg-quick, что и слой 2.0
     if [ "$V3" = 1 ] && [ "${KMOD3:-0}" != 1 ]; then unit_pfx="awg3@"; else unit_pfx="awg-quick@"; fi
-    for i in $ifaces; do
-        if systemctl list-unit-files | grep -q "$unit_pfx"; then
+    # Наличие юнита проверяем БЕЗ конвейера. Прежнее
+    #     systemctl list-unit-files | grep -q "$unit_pfx"
+    # под `set -o pipefail` возвращает 141: `grep -q` выходит по первому
+    # совпадению и закрывает читающий конец трубы, systemctl получает SIGPIPE
+    # на остатке вывода — и весь конвейер считается упавшим. Условие оказывалось
+    # ложным, перезапуск пропускался МОЛЧА, а скрипт всё равно печатал «Готово».
+    # Профиль при этом лежал в файлах, но до работающего демона не доезжал.
+    unit_present=0
+    systemctl cat "${unit_pfx}.service" >/dev/null 2>&1 && unit_present=1
+    if [ "$unit_present" = 1 ]; then
+        for i in $ifaces; do
             log "Перезапуск ${unit_pfx}${i} (чистый старт)"
             # stop + принудительный снос интерфейса (иначе up: already exists) + start
             systemctl stop "${unit_pfx}${i}" 2>/dev/null || true
             ip link del "$i" 2>/dev/null || true
             systemctl start "${unit_pfx}${i}" || err "Не удалось поднять ${unit_pfx}${i}"
-        fi
-    done
+        done
+    else
+        err "Юнит ${unit_pfx}.service не найден."
+        err "   Профиль записан в конфиги, но РАБОТАЮЩИЙ туннель его не получил:"
+        err "   перезапусти интерфейсы вручную, иначе сервер и клиенты разойдутся."
+    fi
+    # Параметры 3.0 живут только в памяти amneziawg-go и применяются из
+    # <iface>.v3 на ExecStartPost. Если перезапуск не случился или UAPI
+    # отказал, файлы будут правильные, а туннель — прежний. Снаружи это
+    # расхождение не видно, поэтому проверяем и говорим вслух.
+    if [ "$V3" = 1 ] && [ -n "$V3_BLOCK" ] && [ "$unit_present" = 1 ] \
+        && [ "$unit_pfx" = "awg3@" ]; then
+        v3_uapi="$(dirname "$(readlink -f "$0")")/awg-uapi.py"
+        [ -f "$v3_uapi" ] || v3_uapi="/opt/antizapret-awg/awg-uapi.py"
+        for i in $ifaces; do
+            live=""
+            [ -f "$v3_uapi" ] && live="$(python3 "$v3_uapi" show "$i" 2>/dev/null || true)"
+            case "$live" in
+                *header_protection_key*) log "Параметры 3.0 приняты демоном ($i)" ;;
+                *) err "Параметры 3.0 НЕ доехали до $i — туннель работает как 2.0."
+                   err "   Смотри: journalctl -u ${unit_pfx}${i} -n 30 --no-pager" ;;
+            esac
+        done
+    fi
     log "Готово. Клиентские конфиги синхронизируются автоматически (regen-all)."
 else
     log "Профиль сгенерирован, но НЕ применён (--apply не задан)."

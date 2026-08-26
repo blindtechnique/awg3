@@ -13,6 +13,7 @@ import html
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -121,6 +122,43 @@ def obf_env() -> dict:
     env["AWG_IFACE2"] = i2
     env["AWG_IFACE3"] = i3
     return env
+
+
+# пресеты те же, что предлагает установщик; router и low объявлены без
+# header protection, паддинга и таймингов — на слое 3.0 это значит, что он
+# обфусцирует ровно как 2.0
+OBF_PRESETS = ("router", "low", "medium", "high", "paranoid")
+OBF_WEAK_FOR_V3 = ("router", "low")
+
+
+def layer_client_count(v3: bool) -> int:
+    """Сколько клиентов потеряют доступ при смене профиля этого слоя."""
+    return len(set(awg_names("awg3" if v3 else "awg2")))
+
+
+def obf_apply_cmd(v3: bool, preset: str, tpl: str) -> list:
+    """Команда для transient-юнита: сменить профиль слоя и перевыпустить конфиги.
+
+    Пути к конфигам не передаём: awg-obfuscation.sh сам читает services.env и
+    берёт интерфейс своего слоя.
+
+    regen-all выполняется ТОЛЬКО при успешной смене профиля — иначе клиенты
+    получили бы конфиги от профиля, который на сервер не лёг.
+
+    Маркер в конце — единственный надёжный способ узнать исход: юнит запущен
+    с --collect и до опроса не доживает, а по хвосту лога результат не читается.
+    """
+    parts = [shlex.quote(OBF_SH)]
+    if v3:
+        parts.append("--v3")
+    parts += ["--preset", shlex.quote(preset), "--fp", "chrome"]
+    if tpl != "auto":
+        parts += ["--template", shlex.quote(tpl)]
+    parts.append("--apply")
+    return ["bash", "-c",
+            "if %s && %s regen-all; then echo AWG_OBF_RESULT=ok; "
+            "else echo AWG_OBF_RESULT=fail; fi"
+            % (" ".join(parts), shlex.quote(CLIENT_SH))]
 
 
 def unit_active(unit: str) -> bool:
@@ -593,10 +631,18 @@ async def on_cb(c: CallbackQuery, state: FSMContext):
     if d in ("reconf:preset", "reconf:preset:2", "reconf3:preset"):
         p = "reconf3" if d.startswith("reconf3") else "reconf"
         ttl = " 3.0" if p == "reconf3" else ""
-        return await show(c, f"🛠 <b>Перенастройка обфускации{ttl}</b>\nИнтенсивность:",
+        # Для слоя 3.0 «поменьше шума» значит не то, что для 2.0: router и low
+        # объявлены с header_protection=False, content_padding=None и
+        # timings=False. Выбрав их, владелец получает слой 3.0 без единого
+        # признака 3.0 — и потом ищет поломку там, где её нет.
+        hint = ("\n\n⚠️ <b>router</b> и <b>low</b> — без header protection, "
+                "паддинга и таймингов: слой 3.0 на них работает как 2.0.\n"
+                "Полный набор 3.0 начинается с <b>medium</b>." if p == "reconf3" else "")
+        return await show(c, f"🛠 <b>Перенастройка обфускации{ttl}</b>\n"
+                          f"Интенсивность:{hint}",
                           kb([[("router", f"{p}:p:router"), ("low", f"{p}:p:low")],
                               [("medium", f"{p}:p:medium"), ("high", f"{p}:p:high")],
-                              [("paranoid", f"{p}:p:paranoid")], back("upd:menu")]))
+                              [("paranoid", f"{p}:p:paranoid")], back("obf:menu")]))
     if d.startswith("reconf:p:") or d.startswith("reconf3:p:"):
         p, _, preset = d.split(":", 2)
         return await show(c, f"Пресет <b>{preset}</b>. Мимикрия:",
@@ -609,22 +655,59 @@ async def on_cb(c: CallbackQuery, state: FSMContext):
                               [("mixed", f"{p}:t:{preset}:mixed")],
                               back(f"{p}:preset")]))
     if d.startswith("reconf:t:") or d.startswith("reconf3:t:"):
+        # Шаг подтверждения. Раньше выбор шаблона применял профиль СРАЗУ, и одно
+        # случайное нажатие отключало всех клиентов слоя без единого вопроса.
+        p, _, preset, tpl = d.split(":", 3)
+        v3 = p == "reconf3"
+        ver, other = ("3.0", "2.0") if v3 else ("2.0", "3.0")
+        n = layer_client_count(v3)
+        weak = ("\n\n⚠️ Пресет <b>{}</b> объявлен без header protection: слой 3.0 "
+                "на нём обфусцирует ровно как 2.0.".format(preset)
+                if v3 and preset in OBF_WEAK_FOR_V3 else "")
+        return await show(
+            c,
+            f"⚠️ <b>Смена профиля обфускации — слой {ver}</b>\n"
+            f"Новый профиль: <b>{preset}</b> / {tpl}{weak}\n\n"
+            f"Параметры обфускации обязаны совпадать на сервере и у клиента, "
+            f"поэтому <b>все выданные конфиги слоя {ver} перестанут работать</b>.\n"
+            f"• затронуто клиентов: <b>{n}</b>\n"
+            f"• конфиги пересоздадутся сами, но каждому придётся заново скачать "
+            f"свой (Клиенты → имя → Скачать конфиг)\n"
+            f"• туннель слоя {ver} на время операции разорвётся\n"
+            f"• слой {other}, порты и ключи не затрагиваются",
+            kb([[("✅ Да, сменить профиль", f"{p}:go:{preset}:{tpl}")],
+                back(f"{p}:preset")]))
+
+    if d.startswith("reconf:go:") or d.startswith("reconf3:go:"):
         p, _, preset, tpl = d.split(":", 3)
         v3 = p == "reconf3"
         ver = "3.0" if v3 else "2.0"
-        await show(c, f"⏳ Применяю {preset}/{tpl} к {ver}…", kb([back("upd:menu")]))
-        args = [OBF_SH] + (["--v3"] if v3 else []) + \
-               ["--preset", preset, "--fp", "chrome", "--apply"]
-        if tpl != "auto":
-            args[-4:-4] = ["--template", tpl]
-        rc, out, err = run(args, timeout=180, env=obf_env())
+        # Операция долгая: смена профиля перезапускает интерфейс, а regen-all
+        # на сотне клиентов идёт минутами. В обработчике callback её держать
+        # нельзя — Telegram оборвёт запрос, а бот всё это время глухой.
+        # Юнит заодно служит замком: второй админ получит отказ, а не гонку.
+        unit = "awg-obf-reconf"
+        logf = f"{LOG_DIR}/awg-obf-reconf.log"
+        rc, _, err = start_bg_unit(unit, obf_apply_cmd(v3, preset, tpl), logf)
         if rc != 0:
-            return await show(c, f"❌ {html.escape(err or out)[:800]}", kb([back("upd:menu")]))
-        run([CLIENT_SH, "regen-all"], timeout=300)
-        return await show(c, f"✅ Профиль <b>{preset}/{tpl}</b> ({ver}) применён, конфиги "
-                          "клиентов пересозданы.\n⚠️ Клиентам нужно переимпортировать "
-                          "конфиги (Скачать конфиг → заново в приложение).\n"
-                          "Порты и ключи не менялись.", kb([back("upd:menu")]))
+            return await show(c, f"❌ {html.escape(err)[:400]}", kb([back("obf:menu")]))
+        await watch_unit(c, unit, logf, f"🛠 <b>Меняю профиль {ver} на {preset}/{tpl}…</b>",
+                         "", back_cb="obf:menu")
+        tail = log_tail(logf, lines=200, width=100000)
+        if "AWG_OBF_RESULT=ok" in tail:
+            note = (f"✅ Профиль <b>{preset}/{tpl}</b> ({ver}) применён, конфиги "
+                    f"клиентов пересозданы.\n⚠️ Каждому клиенту слоя {ver} нужно "
+                    f"заново скачать и импортировать конфиг.\nПорты и ключи не менялись.")
+            if "НЕ доехали" in tail:
+                note = (f"⚠️ Профиль <b>{preset}/{tpl}</b> записан, но параметры 3.0 "
+                        f"не приняты демоном — туннель работает как 2.0.\n"
+                        f"Лог: {logf}")
+        else:
+            note = (f"❌ Сменить профиль не удалось. Конфиги клиентов НЕ трогались.\n"
+                    f"Лог: {logf}")
+        return await show(c, f"🛠 <b>Слой {ver}</b>\n"
+                          f"<pre>{html.escape(log_tail(logf))}</pre>\n\n{note}",
+                          kb([back("obf:menu")]), stamp=True)
 
     if d in ("doctor:run", "doctor:deep", "doctor:selftest"):
         deep = d == "doctor:deep"
@@ -652,14 +735,18 @@ async def on_cb(c: CallbackQuery, state: FSMContext):
         # у слоёв 2.0 и 3.0 отдельные профили (obfuscation.env / obfuscation3.env):
         # разные интерфейсы, разные датапасы. Если стоят оба — показываем оба ряда.
         _l2, _l3 = layers_available()
+        # «Сменить» раньше вело на obf:regen, который пресет НЕ меняет — он
+        # лишь перевыпускает сигнатуры внутри прежнего пресета. Смена пресета
+        # жила в меню обновлений, где её никто не искал.
         rows = []
         if _l2:
-            rows.append([("👁 Показать 2.0", "obf:show"), ("🔄 Сменить 2.0", "obf:regen")]
-                        if _l3 else [("👁 Показать", "obf:show")])
-            if not _l3:
-                rows.append([("🔄 Перегенерировать", "obf:regen")])
+            rows.append([("👁 Показать 2.0", "obf:show"), ("🎲 Новые сигнатуры 2.0", "obf:regen")]
+                        if _l3 else [("👁 Показать", "obf:show"),
+                                     ("🎲 Новые сигнатуры", "obf:regen")])
         if _l3:
-            rows.append([("👁 Показать 3.0", "obf:show:3"), ("🔄 Сменить 3.0", "obf:regen:3")])
+            rows.append([("👁 Показать 3.0", "obf:show:3"),
+                         ("🎲 Новые сигнатуры 3.0", "obf:regen:3")])
+        rows.append([("🛠 Сменить пресет", "reconf:preset")])
         rows.append(back())
         return await show(c, "🛡 Обфускация:", kb(rows))
     if d in ("obf:show", "obf:show:3"):

@@ -147,16 +147,27 @@ if [ "$LAYER3" = 1 ]; then
     # 3.0 не применены», и владелец исправного сервера шёл искать несуществующую
     # проблему. Поэтому сначала смотрим, что за пресет вообще просили.
     v3_preset="$(sed -n 's/^META_PRESET=//p' "$AWG_DIR/obfuscation3.meta" 2>/dev/null | head -1)"
+    # «Спросить не удалось» и «ключа нет» — разные диагнозы. Бит +x не проверяем:
+    # скрипт запускается через python3, и потеря права на исполнение раньше
+    # давала диагноз «параметры не применены» на пустом месте.
+    hp3=0; v3_live=""
     if [ "$KMOD3" = 1 ]; then
-        awg show "${IFACE3:-awg3}" 2>/dev/null | grep -qi "header protection" && hp3=1 || hp3=0
-    elif [ -x "$DEST/awg-uapi.py" ]; then
-        python3 "$DEST/awg-uapi.py" show "${IFACE3:-awg3}" 2>/dev/null \
-            | grep -q header_protection_key && hp3=1 || hp3=0
+        v3_live="$(awg show "${IFACE3:-awg3}" 2>/dev/null || true)"
+        case "$v3_live" in *[Hh]eader\ [Pp]rotection*) hp3=1 ;; esac
+    elif [ -f "$DEST/awg-uapi.py" ]; then
+        v3_live="$(python3 "$DEST/awg-uapi.py" show "${IFACE3:-awg3}" 2>/dev/null || true)"
+        case "$v3_live" in *header_protection_key*) hp3=1 ;; esac
     else
-        hp3=0
+        warn "нечем спросить демона: нет $DEST/awg-uapi.py — состояние 3.0 неизвестно"
+        v3_live="?"
     fi
-    if [ "$hp3" = 1 ]; then
+    if [ -z "$v3_live" ]; then
+        warn "${IFACE3:-awg3}: демон не ответил — состояние 3.0 неизвестно"
+        echo "     смотри: journalctl -u awg3@${IFACE3:-awg3} -n 30 --no-pager" >&2
+    elif [ "$hp3" = 1 ]; then
         ok "header protection применена (пресет ${v3_preset:-?})"
+    elif [ "$v3_live" = "?" ]; then
+        :
     else
         case "$v3_preset" in
             router|low)
