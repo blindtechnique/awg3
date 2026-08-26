@@ -1077,7 +1077,9 @@ main() {
     deploy_files
     write_services
     build_interfaces
-    gen_obfuscation
+    # Код 3 значит «в файлы легло, до туннеля не доехало». При установке это
+    # ожидаемо: enable_units поднимает юниты чуть ниже, там профиль и доедет.
+    gen_obfuscation || { _orc=$?; [ "$_orc" = 3 ] || exit "$_orc"; }
     setup_stats
     enable_units
     "$DEST/awg-client.sh" regen-all 2>/dev/null || true
