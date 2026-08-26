@@ -140,17 +140,36 @@ if [ "$LAYER3" = 1 ]; then
     fi
     # Где искать подтверждение: в ядре его печатает сам `awg show`, у
     # userspace-датапаса параметры живут только в памяти — читаем через UAPI.
+    #
+    # Отсутствие ключа — не всегда поломка: пресеты router и low объявлены с
+    # header_protection=False, content_padding=None и timings=False, то есть
+    # ключа там нет ПО ЗАМЫСЛУ. Раньше доктор в обоих случаях писал «параметры
+    # 3.0 не применены», и владелец исправного сервера шёл искать несуществующую
+    # проблему. Поэтому сначала смотрим, что за пресет вообще просили.
+    v3_preset="$(sed -n 's/^META_PRESET=//p' "$AWG_DIR/obfuscation3.meta" 2>/dev/null | head -1)"
     if [ "$KMOD3" = 1 ]; then
-        if awg show "${IFACE3:-awg3}" 2>/dev/null | grep -qi "header protection"; then
-            ok "header protection применена"
-        else
-            warn "параметры 3.0 не применены — датапас работает как 2.0"
-        fi
-    elif [ -x "$DEST/awg-uapi.py" ] && python3 "$DEST/awg-uapi.py" show "${IFACE3:-awg3}" 2>/dev/null \
-         | grep -q header_protection_key; then
-        ok "header protection применена"
+        awg show "${IFACE3:-awg3}" 2>/dev/null | grep -qi "header protection" && hp3=1 || hp3=0
+    elif [ -x "$DEST/awg-uapi.py" ]; then
+        python3 "$DEST/awg-uapi.py" show "${IFACE3:-awg3}" 2>/dev/null \
+            | grep -q header_protection_key && hp3=1 || hp3=0
     else
-        warn "параметры 3.0 не применены — датапас работает как 2.0"
+        hp3=0
+    fi
+    if [ "$hp3" = 1 ]; then
+        ok "header protection применена (пресет ${v3_preset:-?})"
+    else
+        case "$v3_preset" in
+            router|low)
+                ok "пресет $v3_preset — без header protection, так и задумано"
+                echo "     обфускация на уровне 2.0; нужен полный набор 3.0 —" >&2
+                echo "     смени пресет: awg-obfuscation --v3 --preset medium --regenerate --apply" >&2
+                echo "     и раздай клиентам свежие конфиги: awg-client regen-all" >&2 ;;
+            *)
+                warn "пресет ${v3_preset:-?} должен включать header protection, но её нет"
+                echo "     профиль: $AWG_DIR/obfuscation3.env (ищи AWG_HPK_HEX)" >&2
+                echo "     параметры: $AWG_DIR/${IFACE3:-awg3}.v3" >&2
+                echo "     починить: awg-obfuscation --v3 --regenerate --apply" >&2 ;;
+        esac
     fi
 fi
 

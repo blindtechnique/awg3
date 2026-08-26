@@ -25,6 +25,9 @@
 #   --awg 2|3|both    какие версии поднять (по умолчанию спросит)
 #   --host HOST       домен или IP для Endpoint клиентских конфигов
 #   --preset X --template Y --fp Z --mtu N   обфускация без вопросов
+#   --preset3 X --template3 Y   обфускация ОТДЕЛЬНО для слоя 3.0. Пусто —
+#                     как у 2.0. Пресеты router и low объявлены без header
+#                     protection: на них слой 3.0 вырождается в 2.0.
 #   --ports A,B       зафиксировать UDP-порты (2.0,3.0), иначе рандомные
 #   --dns "1.1.1.1, 8.8.8.8"   DNS, который получат клиенты
 #   --no-bot          не спрашивать про Telegram-бота
@@ -94,6 +97,9 @@ KMOD3=0; KMOD3_OFF=0; MODE_SWITCH=0
 NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0
 INSTALL_BOT=0; REMOVE_BOT=0; ASSUME_YES=0
 CLI_VER=""; CLI_PRESET=""; CLI_TEMPLATE=""; CLI_FP=""; CLI_MTU=""; CLI_HOST=""
+# Слой 3.0 настраивается отдельно. Пусто = «взять как у 2.0» — так вели себя
+# все установки, сделанные до появления раздельных пресетов.
+CLI_PRESET3=""; CLI_TEMPLATE3=""
 CLI_PORTS=""; CLI_DNS=""; CLI_BOT_TOKEN=""; CLI_BOT_ADMINS=""
 
 # ── самозагрузка (curl | bash): клонируем репозиторий и перезапускаемся ──────
@@ -120,6 +126,8 @@ while [ $# -gt 0 ]; do
         --awg)        CLI_VER="$2"; shift 2 ;;
         --host|--endpoint) CLI_HOST="$2"; shift 2 ;;
         --preset)     CLI_PRESET="$2"; shift 2 ;;
+        --preset3)    CLI_PRESET3="$2"; shift 2 ;;
+        --template3)  CLI_TEMPLATE3="$2"; shift 2 ;;
         --template)   CLI_TEMPLATE="$2"; shift 2 ;;
         --fp)         CLI_FP="$2"; shift 2 ;;
         --mtu)        CLI_MTU="$2"; shift 2 ;;
@@ -686,6 +694,10 @@ build_interfaces() {
 # ── обфускация ───────────────────────────────────────────────────────────────
 gen_obfuscation() {
     local P="${AWG_PRESET:-medium}" T="${AWG_TEMPLATE:-}" F="${AWG_FP:-chrome}"
+    # Пусто — слой 3.0 настраивается как 2.0. Именно так выглядит state всех
+    # установок, сделанных до появления раздельных пресетов: в нём только
+    # AWG_PRESET, и молча менять им профиль нельзя — это перевыпуск клиентов.
+    local P3="${AWG_PRESET3:-$P}" T3="${AWG_TEMPLATE3:-$T}"
     # Новый профиль генерируем ТОЛЬКО по явному --reconfigure. Во всех прочих
     # случаях он уже согласован с выданными клиентами и его достаточно разложить
     # заново.
@@ -708,9 +720,9 @@ gen_obfuscation() {
             ${ENDPOINT:+--host "$ENDPOINT"} "$mode2"
     fi
     if [ "$LAYER3" = 1 ]; then
-        log "Профиль обфускации 3.0: preset=$P template=${T:-default}"
+        log "Профиль обфускации 3.0: preset=$P3 template=${T3:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE3}.conf" "$DEST/awg-obfuscation.sh" --v3 \
-            --preset "$P" ${T:+--template "$T"} --fp "$F" --mtu "$MTU3" \
+            --preset "$P3" ${T3:+--template "$T3"} --fp "$F" --mtu "$MTU3" \
             ${ENDPOINT:+--host "$ENDPOINT"} "$mode3"
     fi
 }
@@ -822,6 +834,7 @@ ask_params() {
         return 0
     fi
     local VER_CHOICE PRESET=medium TEMPLATE="" FP=chrome
+    local PRESET3="" TEMPLATE3=""      # пусто = как у слоя 2.0
     AWG_VER="${CLI_VER:-}"
     if [ -z "$AWG_VER" ] && has_tty; then
         echo "═══════════════════════════════════════════════════════════════" > /dev/tty
@@ -842,6 +855,7 @@ ask_params() {
 
     if [ -n "$CLI_PRESET" ]; then
         PRESET="$CLI_PRESET"; TEMPLATE="$CLI_TEMPLATE"; FP="${CLI_FP:-chrome}"
+        PRESET3="$CLI_PRESET3"; TEMPLATE3="$CLI_TEMPLATE3"
     elif has_tty; then
         echo > /dev/tty
         echo "═══════════════════════════════════════════════════════════════" > /dev/tty
@@ -859,6 +873,32 @@ ask_params() {
         echo "   0) авто [по умолчанию]  1) quic  2) tls  3) web  4) voip  5) dns  6) mixed" > /dev/tty
         ask_pick T 0 "0 1 2 3 4 5 6"
         case "$T" in 1) TEMPLATE=quic ;; 2) TEMPLATE=tls ;; 3) TEMPLATE=web ;; 4) TEMPLATE=voip ;; 5) TEMPLATE=dns ;; 6) TEMPLATE=mixed ;; *) TEMPLATE="" ;; esac
+        # У слоя 3.0 «интенсивность» значит другое: router и low объявлены без
+        # header protection, паддинга и таймингов, то есть на них 3.0 отдаёт
+        # ровно то же, что 2.0, и отдельный слой теряет смысл. Спрашиваем
+        # отдельно и говорим об этом прямо — иначе человек ставит слой 3.0,
+        # получает профиль без его главных признаков и идёт искать поломку.
+        if [ "$AWG_VER" != 2 ]; then
+            echo > /dev/tty
+            echo "  Обфускация слоя 3.0 — отдельно от слоя 2.0" > /dev/tty
+            echo > /dev/tty
+            echo "   1) router    2) low    3) medium [по умолчанию]" > /dev/tty
+            echo "   4) high      5) paranoid" > /dev/tty
+            echo > /dev/tty
+            echo "   ⚠️  router и low — БЕЗ header protection, паддинга и" > /dev/tty
+            echo "       таймингов: слой 3.0 на них работает как 2.0." > /dev/tty
+            echo "       Полный набор 3.0 начинается с medium." > /dev/tty
+            ask_pick P3 3 "1 2 3 4 5"
+            case "$P3" in 1) PRESET3=router ;; 2) PRESET3=low ;; 4) PRESET3=high ;; 5) PRESET3=paranoid ;; *) PRESET3=medium ;; esac
+            case "$PRESET3" in
+                router|low) log "Выбран $PRESET3: слой 3.0 будет без header protection" ;;
+            esac
+            echo > /dev/tty
+            echo "  Маскировка слоя 3.0:" > /dev/tty
+            echo "   0) как у 2.0 [по умолчанию]  1) quic  2) tls  3) web  4) voip  5) dns  6) mixed" > /dev/tty
+            ask_pick T3 0 "0 1 2 3 4 5 6"
+            case "$T3" in 1) TEMPLATE3=quic ;; 2) TEMPLATE3=tls ;; 3) TEMPLATE3=web ;; 4) TEMPLATE3=voip ;; 5) TEMPLATE3=dns ;; 6) TEMPLATE3=mixed ;; *) TEMPLATE3="$TEMPLATE" ;; esac
+        fi
     fi
 
     resolve_endpoint
@@ -870,6 +910,8 @@ ask_params() {
         echo "AWG_VER='$AWG_VER'"
         echo "AWG_PRESET='$PRESET'"
         echo "AWG_TEMPLATE='$TEMPLATE'"
+        echo "AWG_PRESET3='$PRESET3'"
+        echo "AWG_TEMPLATE3='$TEMPLATE3'"
         echo "AWG_FP='$FP'"
         echo "AWG_ENDPOINT='$ENDPOINT'"
         echo "AWG_BOT_INSTALL='${BOT_INSTALL:-0}'"

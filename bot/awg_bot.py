@@ -727,11 +727,11 @@ async def report_pending():
     # (сообщение, каким флагом пометить после успешной отправки)
     jobs = []
     if st.get("awg_upd") == "ok" and not st.get("awg_reported"):
-        jobs.append(("✅ <b>Слой AWG 2.0 обновлён</b>, бот перезапущен. "
+        jobs.append(("✅ <b>Код сервера обновлён</b>, бот перезапущен. "
                      "Клиенты и обфускация не менялись.",
                      dict(awg_reported=True, awg_upd=None)))
     elif st.get("awg_upd") == "fail" and not st.get("awg_reported"):
-        jobs.append(("❌ <b>Обновление AWG 2.0 не удалось.</b> "
+        jobs.append(("❌ <b>Обновление кода сервера не удалось.</b> "
                      "Лог: /var/log/az-awg-update.log",
                      dict(awg_reported=True, awg_upd=None)))
     if not jobs:
