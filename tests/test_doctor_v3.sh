@@ -27,6 +27,9 @@ run() {
         dead)  printf 'import sys\nsys.exit(1)\n' > "$d/dest/awg-uapi.py" ;;
         nofile) : ;;
     esac
+    # переменные ниже читает вырезанный из скрипта блок под eval,
+    # статически такую связь не увидеть
+    # shellcheck disable=SC2034
     ( set -uo pipefail
       AWG_DIR="$d/etc"; DEST="$d/dest"; KMOD3=0; IFACE3=awg3
       ok(){   echo "ok|$*";   }

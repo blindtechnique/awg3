@@ -92,7 +92,7 @@ SRC=/opt/src
 AWG_KMOD_SRC_REF="${AWG_KMOD_SRC_REF:-v3.0.20260805}"
 AWG_KMOD_REF="${AWG_KMOD_REF:-}"
 KMOD_STAMP="$SRC/.amneziawg-kmod.ref"
-KMOD3=0; KMOD3_OFF=0; MODE_SWITCH=0
+KMOD3=0
 
 NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0
 INSTALL_BOT=0; REMOVE_BOT=0; ASSUME_YES=0
@@ -399,8 +399,8 @@ install_kmod() {
         # ip link del освобождает netdev асинхронно — сразу следом rmmod иногда
         # даёт EBUSY на ровном месте. Гнать администратора в reboot из-за гонки
         # в доли секунды дорого, поэтому несколько попыток.
-        local n rmmod_ok=0
-        for n in 1 2 3 4 5; do
+        local rmmod_ok=0
+        for _ in 1 2 3 4 5; do
             rmmod amneziawg 2>/dev/null && { rmmod_ok=1; break; }
             sleep 1
         done
@@ -936,14 +936,15 @@ uninstall_all() {
     echo
     if ! ask_yn "Удалить всё это безвозвратно?" n; then log "Отменено"; exit 0; fi
 
-    for i in "${IFACE2:-awg2}"; do
-        systemctl disable --now "awg-quick@$i" 2>/dev/null || true
-        ip link del "$i" 2>/dev/null || true
-    done
-    for i in "${IFACE3:-awg3}"; do
-        systemctl disable --now "awg3@$i" 2>/dev/null || true
-        ip link del "$i" 2>/dev/null || true
-    done
+    i="${IFACE2:-awg2}"
+    systemctl disable --now "awg-quick@$i" 2>/dev/null || true
+    ip link del "$i" 2>/dev/null || true
+    # Слой 3.0 обслуживает awg3@, но на сервере, который когда-то жил с
+    # KMOD3=1, его поднимал awg-quick@ — гасим оба, иначе удаление оставляет
+    # включённый юнит на интерфейс, которого больше нет.
+    i="${IFACE3:-awg3}"
+    systemctl disable --now "awg3@$i" "awg-quick@$i" 2>/dev/null || true
+    ip link del "$i" 2>/dev/null || true
     systemctl disable --now awg-bot awg-stats.timer awg-expire.timer 2>/dev/null || true
     rm -f /etc/systemd/system/awg3@.service /etc/systemd/system/awg-bot.service \
           /etc/systemd/system/awg-stats.* /etc/systemd/system/awg-expire.*
