@@ -63,6 +63,9 @@ head_ "Установщик"
 run "раздельный пресет слоя 3.0 и приоритет флагов" \
     bash tests/test_install_preset3.sh install.sh bin/awg-obfuscation.sh
 
+head_ "Ловушки bash"
+run "занятый порт, пустой адрес и конфиг без ключа не рушат прогон"     bash tests/test_bash_traps.sh
+
 head_ "Сухой прогон"
 run "--plan показывает то, что будет, и не трогает диск"     bash tests/test_plan.sh
 

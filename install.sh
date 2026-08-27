@@ -263,7 +263,13 @@ check_cli_ports() {  # 0, если --ports пуст или корректен
     valid_port "$p2" && valid_port "$p3" && [ "$p2" != "$p3" ]
 }
 
-busy_ports() { ss -lunH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u; }
+# Поле берём с конца, а не по номеру: `ss -lunH` печатает колонку Netid не
+# на всех версиях iproute2 (при фильтре по одному протоколу она опускается),
+# и жёсткий $4/$5 угадывает лишь на одной из раскладок. Локальный адрес —
+# предпоследнее поле в любой. `|| true` обязателен: когда UDP-слушателей нет
+# вовсе, grep не находит ничего и отдаёт 1, а pipefail протаскивает это в
+# подстановку, где вызов стоит первым.
+busy_ports() { ss -lunH 2>/dev/null | awk '{print $(NF-1)}' | grep -oE '[0-9]+$' | sort -u || true; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
 pick_random_port() {  # pick_random_port <занятые через пробел>
@@ -271,7 +277,18 @@ pick_random_port() {  # pick_random_port <занятые через пробел
     busy="$(busy_ports; printf '%s\n' $extra; echo 22; echo 53; echo 80; echo 443)"
     for i in $(seq 1 200); do
         p=$(( 20000 + RANDOM % 40000 ))
-        echo "$busy" | grep -qx "$p" || { echo "$p"; return 0; }
+        # Без трубы намеренно. `echo "$busy" | grep -qx "$p"` под pipefail
+        # отдаёт 141, когда совпадение нашлось в начале длинного списка: grep
+        # выходит по первому совпадению, echo получает SIGPIPE. 141 ≠ 0, то
+        # есть срабатывала ветка ||, и ЗАНЯТЫЙ порт объявлялся свободным — а на
+        # первой установке он закрепляется навсегда и awg-quick падает на bind.
+        # Измерено: rc=141 на списке в 100000 строк с совпадением в начале,
+        # rc=0 на коротком (влезает в буфер трубы) — то есть на боевой машине
+        # это выстреливало бы тем реже, чем труднее было бы поймать.
+        case $'\n'"$busy"$'\n' in
+            *$'\n'"$p"$'\n'*) ;;              # занят — берём следующий
+            *) echo "$p"; return 0 ;;
+        esac
     done
     echo 51820
 }
@@ -652,7 +669,11 @@ build_iface() {  # build_iface <имя> <подсеть> <порт> <mtu> <сл�
     if [ -f "$conf" ]; then
         # ключ сервера и peers переживают переустановку: иначе все выданные
         # клиенты разом перестанут подключаться
-        priv="$(grep '^PrivateKey' "$conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \t')"
+        # `|| true` обязателен: под pipefail грep без совпадения отдаёт 1, и
+        # присваивание убивало прогон молча. Ветка «ключа нет — генерируем»
+        # ниже была недостижима именно тогда, когда она и нужна: конфиг есть,
+        # а PrivateKey в нём нет.
+        priv="$(grep '^PrivateKey' "$conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d ' \t' || true)"
         peers="$(awk '/^\[Peer\]/{p=1} p{print}' "$conf")"
     fi
     if [ -n "$priv" ] && printf '%s' "$priv" | awg pubkey >/dev/null 2>&1; then
@@ -1448,7 +1469,14 @@ main() {
     ask_params
     # shellcheck disable=SC1090
     . "$STATE"
-    ENDPOINT="${AWG_ENDPOINT:-$ENDPOINT}"
+    # ${AWG_ENDPOINT:-$ENDPOINT} под set -u падает «unbound variable», когда в
+    # state лежит ПУСТОЙ AWG_ENDPOINT: на этом пути ask_params вышла ранним
+    # return, resolve_endpoint не звалась, и ENDPOINT в прогоне не существует
+    # вовсе. Так выглядит сервер, поставленный без tty и без внешнего адреса:
+    # прогон умирал сразу после apt-get, не сделав ничего полезного.
+    ENDPOINT="${AWG_ENDPOINT:-${ENDPOINT:-}}"
+    [ -n "$ENDPOINT" ] || ENDPOINT="$(detect_public_ip)"
+    [ -n "$ENDPOINT" ] || { err "адрес сервера неизвестен — задай --host"; exit 1; }
     # plan_services обязан отработать ДО сборки по двум причинам. Во-первых,
     # оттуда приезжают настоящие имена интерфейсов: install_kmod гасит их перед
     # rmmod, и с дефолтными awg2/awg3 на сервере с другими именами он погасил бы
