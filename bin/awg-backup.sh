@@ -68,14 +68,30 @@ do_restore() {
     if [ "$file" != "${file%.enc}" ]; then
         if [ -z "${BACKUP_PASS:-}" ] && (exec </dev/tty) 2>/dev/null; then
             read -rsp "Пароль архива: " BACKUP_PASS < /dev/tty; echo >&2
+            # export обязателен: openssl читает пароль ИЗ ОКРУЖЕНИЯ
+            # (-pass env:…), а read создаёт обычную переменную оболочки.
+            # Без него введённый с клавиатуры правильный пароль давал
+            # «No environment variable BACKUP_PASS» и, с заглушённым stderr,
+            # сообщение «неверный пароль или битый архив». То есть
+            # восстановление зашифрованного архива в интерактиве не работало
+            # никогда — работал только путь BACKUP_PASS=… в окружении.
+            # На стороне создания архива export уже стоит, ниже по файлу.
+            export BACKUP_PASS
         fi
         [ -n "${BACKUP_PASS:-}" ] || { err "нужен пароль для $file"; exit 2; }
-        local dec; dec="$(mktemp /tmp/awg-restore.XXXXXX.tar.gz)"
+        # НЕ local: тело trap в одинарных кавычках вычисляется в момент выхода
+        # ОБОЛОЧКИ, когда do_restore давно вернулась и её local уже уничтожен.
+        # Под set -u trap падал на «unbound variable»: расшифрованный архив с
+        # приватными ключами сервера и ВСЕХ клиентов оставался лежать в /tmp, а
+        # скрипт отдавал 1 сразу после строки «Восстановление завершено» — тот,
+        # кто читает код возврата, видел отказ на успешном восстановлении.
+        # ${_dec:-} — на случай выхода до присваивания: trap исполняется всегда.
+        _dec="$(mktemp /tmp/awg-restore.XXXXXX.tar.gz)"
+        trap 'rm -f "${_dec:-}"' EXIT
         openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
-            -in "$file" -out "$dec" -pass env:BACKUP_PASS 2>/dev/null \
-            || { rm -f "$dec"; err "неверный пароль или битый архив"; exit 2; }
-        file="$dec"
-        trap 'rm -f "$dec"' EXIT
+            -in "$file" -out "$_dec" -pass env:BACKUP_PASS 2>/dev/null \
+            || { err "неверный пароль или битый архив"; exit 2; }
+        file="$_dec"
     fi
 
     local stage; stage="$(mktemp -d)"

@@ -178,6 +178,138 @@ else
     ok "проверка занятости порта обходится без трубы"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "5. Загруженный модуль виден всегда, а не через раз"
+# `lsmod | grep -q` под pipefail отдаёт 141: grep выходит по первому совпадению,
+# lsmod продолжает писать и получает SIGPIPE. Условие if от 141 ЛОЖНО, и блок
+# выгрузки старого модуля молча пропускается — ровно на том сервере, ради
+# которого он написан. Итог: новый .ko на диске, старый модуль в памяти,
+# утилиты уже пересобраны, awg виснет.
+# Комментарии отбрасываем: в них труба упомянута нарочно, как объяснение.
+if grep -v '^[[:space:]]*#' install.sh | grep -qE 'lsmod[^|]*\|[[:space:]]*grep'; then
+    bad "вернулся «lsmod | grep»" "под pipefail SIGPIPE даёт 141, и блок пропускается"
+else
+    ok "проверка загруженного модуля обходится без трубы"
+fi
+# Берём только УСЛОВИЕ: со словами `if` и `; then` кусок не исполнить.
+COND="$(grep -F "grep -q '^amneziawg " install.sh | head -1         | sed 's/^[[:space:]]*if //; s/; then$//')"
+if [ -z "$COND" ]; then
+    bad "не нашли проверку загруженного модуля" "мерить нечего"
+else
+    mods="$WORK/modules"
+    {
+        printf 'amneziawg 249856 0 - Live 0xffffffffc0a00000\n'
+        for i in $(seq 1 250); do
+            printf 'filler_%s 16384 0 - Live 0xffffffffc0%03x000\n' "$i" "$i"
+        done
+    } > "$mods"                       # ≈11 КБ: заведомо больше одного блока
+    run="$(printf '%s' "$COND" | sed "s#/proc/modules#$mods#")"
+    c=0
+    for i in $(seq 1 50); do
+        bash -c "set -euo pipefail; $run" >/dev/null 2>&1 || c=$((c+1))
+    done
+    [ "$c" = 0 ] && ok "загруженный модуль виден все 50 раз" \
+        || bad "проверка рвётся" "провалов: $c из 50"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "6. Чужой services.env не уничтожается и не роняет прогон"
+# installed() — это просто [ -f "$SERVICES" ]. По тому же пути свой файл держит
+# другой продукт, и свой же может остаться обрезанным от убитого прогона.
+# Без проверки всё умирало под set -u в write_services — уже ПОСЛЕ того, как
+# редирект обрезал файл: восстановить нечего, а installed() по-прежнему true.
+GUARD="$(sed -n '/^plan_services()/,/^}$/p' install.sh)"
+WS="$(sed -n '/^write_services()/,/^}$/p' install.sh)"
+if [ -z "$GUARD" ] || [ -z "$WS" ]; then
+    bad "не нашли plan_services/write_services" "мерить нечего"
+else
+    foreign="$WORK/foreign.env"
+    printf "WAN='eth0'\nENDPOINT='1.2.3.4'\nIFACES='wg0'\n" > "$foreign"
+    before="$(md5sum "$foreign" | cut -d" " -f1)"
+    out="$(bash -c "set -euo pipefail
+        SERVICES='$foreign'; AWG_DIR='$WORK'; CLI_PORTS=''; CLI_MTU=''; CLI_DNS=''
+        LAYER2=1; LAYER3=1; ENDPOINT=''; CLIENT_DIR='$WORK/clients'; PLAN=0
+        installed() { [ -f \"\$SERVICES\" ]; }
+        log() { :; }; err() { printf 'ERR %s\n' \"\$*\"; }
+        $GUARD
+        $WS
+        plan_services && write_services
+        echo 'ДОШЛИ'" 2>&1)" || true
+    after="$(md5sum "$foreign" | cut -d" " -f1)"
+    case "$out" in
+        *"это не план awg3"*) ok "чужой файл распознан и назван" ;;
+        *) bad "чужой файл не распознан" "вышло «$(printf '%s' "$out" | head -2 | tr '\n' ' ')»" ;;
+    esac
+    [ "$before" = "$after" ] && ok "и не уничтожен" \
+        || bad "чужой services.env перезаписан" "восстановить его неоткуда"
+    case "$out" in
+        *ДОШЛИ*) bad "прогон продолжился на чужом файле" ;;
+        *) ok "прогон остановлен, а не продолжен вслепую" ;;
+    esac
+
+    # Старая установка без новых ключей обязана обновляться, а не получать отказ:
+    # MTU/DNS/WAN восстановимы, порт и подсеть — нет.
+    old="$WORK/old.env"
+    printf "IFACE2='awg2'\nIFACE3='awg3'\nSUBNET2='10.29.79'\nSUBNET3='10.29.80'\nPORT2='51820'\nPORT3='51821'\n" > "$old"
+    out="$(bash -c "set -euo pipefail
+        SERVICES='$old'; AWG_DIR='$WORK'; CLI_PORTS=''; CLI_MTU=''; CLI_DNS=''
+        LAYER2=1; LAYER3=1; ENDPOINT='vpn.example.org'; CLIENT_DIR='$WORK/clients'; PLAN=0
+        installed() { [ -f \"\$SERVICES\" ]; }
+        log() { :; }; err() { printf 'ERR %s\n' \"\$*\"; }
+        $GUARD
+        $WS
+        plan_services && write_services
+        echo 'ДОШЛИ'" 2>&1)" || true
+    case "$out" in
+        *ДОШЛИ*) ok "старый файл без MTU/DNS/WAN доезжает до записи" ;;
+        *) bad "старая установка получила отказ" "вышло «$(printf '%s' "$out" | head -2 | tr '\n' ' ')»" ;;
+    esac
+    grep -q "PORT2='51820'" "$old" && ok "порт при этом не выдуман заново" \
+        || bad "порт изменился" "выданные конфиги перестанут подключаться"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "7. Восстановление из .enc не оставляет ключи в /tmp"
+DR="$(sed -n '/^do_restore()/,/^}$/p' bin/awg-backup.sh)"
+if [ -z "$DR" ]; then
+    bad "не нашли do_restore" "мерить нечего"
+elif ! command -v openssl >/dev/null 2>&1; then
+    printf '  · openssl нет — раздел пропущен\n'
+else
+    mkdir -p "$WORK/stage/amneziawg" "$WORK/stage/clients" "$WORK/stage/state"
+    echo "awg3" > "$WORK/stage/MANIFEST"
+    echo "PrivateKey = SECRET" > "$WORK/stage/amneziawg/awg2.conf"
+    tar -czf "$WORK/bk.tar.gz" -C "$WORK/stage" .
+    PW=hunter2 openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+        -in "$WORK/bk.tar.gz" -out "$WORK/bk.tar.gz.enc" -pass env:PW 2>/dev/null
+    rm -f /tmp/awg-restore.*          # mktemp в do_restore жёстко в /tmp
+    bash -c "set -euo pipefail
+        AWG_DIR='$WORK/etc'; DEST='$WORK/dest'; export BACKUP_PASS=hunter2
+        log() { :; }; err() { printf '%s\n' \"\$*\" >&2; }
+        systemctl() { :; }
+        $DR
+        do_restore '$WORK/bk.tar.gz.enc'" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" = 0 ] && ok "успешное восстановление отдаёт 0" \
+        || bad "успешное восстановление отдаёт $rc" "обёртки прочтут это как отказ"
+    left="$(find /tmp -maxdepth 1 -name 'awg-restore.*' 2>/dev/null | wc -l)"
+    [ "$left" = 0 ] && ok "расшифрованный архив убран из /tmp" \
+        || bad "в /tmp остались приватные ключи" "файлов: $left"
+    rm -f /tmp/awg-restore.*
+    # openssl читает пароль из ОКРУЖЕНИЯ. read создаёт обычную переменную
+    # оболочки, поэтому без export введённый с клавиатуры верный пароль давал
+    # «неверный пароль или битый архив» — интерактивное восстановление
+    # зашифрованного архива не работало никогда.
+    if sed -n '/read -rsp "Пароль архива/,+12p' bin/awg-backup.sh | grep -q 'export BACKUP_PASS'; then
+        ok "введённый с клавиатуры пароль уезжает в окружение"
+    else
+        bad "пароль из read не экспортируется" "openssl его не увидит"
+    fi
+    grep -q 'PrivateKey = SECRET' "$WORK/etc/awg2.conf" 2>/dev/null \
+        && ok "и данные при этом действительно восстановлены" \
+        || bad "восстановление не разложило файлы"
+fi
+
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"
 exit $fail
