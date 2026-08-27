@@ -234,6 +234,8 @@ list_clients() {
 
 # ── пересобрать конфиги под текущий профиль ──────────────────────────────────
 regen_all() {
+    # сколько конфигов реально изменилось: см. итог в конце функции
+    local same=0 changed=0 changed_list="" before after
     # shellcheck disable=SC1090
     . "$SERVICES"
     local svc conf name
@@ -251,6 +253,7 @@ regen_all() {
         for conf in "${CLIENT_DIR}/${svc}"/*-am.conf; do
             [ -f "$conf" ] || continue
             name="$(basename "$conf" | sed "s/^${svc}-//;s/-am.conf//")"
+            before="$(md5sum "$conf" | cut -d" " -f1)"
             python3 - "$conf" "$AWG_OBFUSCATION" <<'PY'
 import sys
 path, block = sys.argv[1], sys.argv[2]
@@ -265,6 +268,13 @@ for line in txt:
         in_iface = True; out.append(line); continue
     if line.strip().startswith("[Peer]"):
         if in_iface:
+            # Хвостовые пустые строки [Interface] убираем ПЕРЕД вставкой:
+            # иначе каждый прогон regen-all добавлял бы ещё одну, файл
+            # менялся бы без единого содержательного изменения, и владелец
+            # думал бы, что клиентам пора раздавать конфиги заново.
+            while out and not out[-1].strip():
+                out.pop()
+            out.append("")
             out.extend(block.splitlines()); out.append("")
         in_iface = False; out.append(line); continue
     if key in obf:
@@ -272,12 +282,26 @@ for line in txt:
     out.append(line)
 open(path, "w", encoding="utf-8").write("\n".join(out) + "\n")
 PY
+            after="$(md5sum "$conf" | cut -d" " -f1)"
             "$PY" "$EXPORT" "$conf" --name "${svc}-${name}" \
                 --outdir "$(dirname "$conf")" --all >/dev/null \
                 || log "  QR не собран для $svc/$name (см. предупреждение выше)"
-            log "пересоздан: $svc/$name"
+            if [ "$before" = "$after" ]; then
+                same=$((same+1))
+            else
+                changed=$((changed+1)); changed_list="$changed_list $svc/$name"
+                log "изменён: $svc/$name"
+            fi
         done
     done
+    # Итог важнее перечисления: после обновления слоя нужно знать не «что-то
+    # происходило», а придётся ли людям заново импортировать конфиги.
+    if [ "$changed" = 0 ]; then
+        log "Конфиги клиентов: $same без изменений — переимпорт не нужен"
+    else
+        log "Конфиги клиентов: $same без изменений, $changed изменено"
+        log "   Заново скачать конфиг нужно:$changed_list"
+    fi
     return 0
 }
 
