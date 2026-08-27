@@ -36,6 +36,15 @@
 #   --remove-bot      удалить только бота
 #   --update          обновить код и бинарники БЕЗ смены обфускации и клиентов
 #   --reconfigure     новый профиль обфускации (клиентам нужны новые конфиги)
+#   --plan            показать, что сделает эта же команда, и выйти, ничего
+#                     не изменив: --plan --update, --plan --reconfigure,
+#                     --plan --reconfigure --awg 3. Без --reconfigure флаги
+#                     --awg/--preset/--host не применяются ни в плане, ни в
+#                     прогоне: параметры берутся из install-state.env.
+#                     С --uninstall, --install-bot и --remove-bot НЕ сочетается —
+#                     у этих операций отчёта нет, код возврата 2.
+#                     По curl репозиторий всё равно клонируется во временный
+#                     каталог: без исходников показывать нечего.
 #   --uninstall       удалить всё, что поставил этот скрипт
 #   --yes             не переспрашивать (для автоматизации)
 #   --kmod3 / --no-kmod3   ОТКЛЮЧЕНЫ, выходят с кодом 2. Ветка feat/awg3
@@ -94,7 +103,7 @@ AWG_KMOD_REF="${AWG_KMOD_REF:-}"
 KMOD_STAMP="$SRC/.amneziawg-kmod.ref"
 KMOD3=0
 
-NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0
+NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0; PLAN=0
 INSTALL_BOT=0; REMOVE_BOT=0; ASSUME_YES=0
 CLI_VER=""; CLI_PRESET=""; CLI_TEMPLATE=""; CLI_FP=""; CLI_MTU=""; CLI_HOST=""
 # Слой 3.0 настраивается отдельно. Пусто = «взять как у 2.0» — так вели себя
@@ -103,6 +112,12 @@ CLI_PRESET3=""; CLI_TEMPLATE3=""
 CLI_PORTS=""; CLI_DNS=""; CLI_BOT_TOKEN=""; CLI_BOT_ADMINS=""
 
 # ── самозагрузка (curl | bash): клонируем репозиторий и перезапускаемся ──────
+# Разбор флагов идёт ниже, а самозагрузка — выше него: при запуске по curl
+# сухой прогон успевал поставить пакет и изменить машину раньше, чем что-то
+# показать. Смотрим аргументы дёшево, до всякой работы.
+PLAN_EARLY=0
+for _a in "$@"; do [ "$_a" = --plan ] && PLAN_EARLY=1; done
+
 SELF="${BASH_SOURCE[0]:-$0}"
 SELF_DIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd || echo /nonexistent)"
 if [ ! -f "$SELF_DIR/bin/awg-client.sh" ]; then
@@ -110,6 +125,12 @@ if [ ! -f "$SELF_DIR/bin/awg-client.sh" ]; then
         echo "[bootstrap] неполная структура репозитория" >&2; exit 1
     fi
     echo "[bootstrap] загружаю репозиторий…"
+    if [ "$PLAN_EARLY" = 1 ] && ! command -v git >/dev/null 2>&1; then
+        echo "[bootstrap] --plan по curl требует git: ставить пакет ради отчёта" >&2
+        echo "            значило бы изменить систему раньше, чем что-то показать." >&2
+        echo "            apt-get install -y git — и повтори команду." >&2
+        exit 2
+    fi
     command -v git >/dev/null 2>&1 || { apt-get update -y >/dev/null; apt-get install -y -qq git >/dev/null; }
     BOOT_DIR="$(mktemp -d)"
     git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$BOOT_DIR/repo"
@@ -142,6 +163,7 @@ while [ $# -gt 0 ]; do
         --remove-bot) REMOVE_BOT=1; shift ;;
         --update)     UPDATE=1; shift ;;
         --reconfigure) RECONFIGURE=1; shift ;;
+        --plan)       PLAN=1; shift ;;
         --uninstall)  UNINSTALL=1; shift ;;
         --yes|-y)     ASSUME_YES=1; shift ;;
         # Режим отключён намеренно. Ветка feat/awg3 удалена апстримом после
@@ -232,6 +254,15 @@ ask_str() {  # ask_str <имя> "<подсказка>" "<дефолт>"
 # ── порты ────────────────────────────────────────────────────────────────────
 # ВНИМАНИЕ: у `ss -lunH` локальный адрес — четвёртая колонка. Пятая это peer
 # («0.0.0.0:*»), и по ней список занятых портов всегда получается пустым.
+# Спрашивают её двое: plan_services перед выбором портов и plan_report перед
+# тем, как назвать их в отчёте. Второй вызов и есть смысл выделения: без него
+# план хвалил «случайные свободные» там, где прогон откажет с кодом 2.
+check_cli_ports() {  # 0, если --ports пуст или корректен
+    [ -n "$CLI_PORTS" ] || return 0
+    local p2="${CLI_PORTS%%,*}" p3="${CLI_PORTS##*,}"
+    valid_port "$p2" && valid_port "$p3" && [ "$p2" != "$p3" ]
+}
+
 busy_ports() { ss -lunH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -u; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
@@ -565,9 +596,8 @@ plan_services() {
     fi
     local p2 p3
     if [ -n "$CLI_PORTS" ]; then
+        check_cli_ports || { err "--ports: нужно два разных порта через запятую"; exit 2; }
         p2="${CLI_PORTS%%,*}"; p3="${CLI_PORTS##*,}"
-        valid_port "$p2" && valid_port "$p3" && [ "$p2" != "$p3" ] || {
-            err "--ports: нужно два разных порта через запятую"; exit 2; }
     else
         p2="$(pick_random_port)"
         p3="$(pick_random_port "$p2")"
@@ -582,6 +612,12 @@ plan_services() {
 }
 
 write_services() {
+    # Дойти сюда в режиме --plan можно только по ошибке в коде. Записать молча
+    # значило бы соврать: пользователь просил показать, а не сделать.
+    if [ "$PLAN" = 1 ]; then
+        err "внутренняя ошибка: запись services.env в режиме --plan"
+        exit 1
+    fi
     umask 077
     {
         echo "# awg3 — план сервисов. Правится установщиком, не руками."
@@ -692,6 +728,13 @@ build_interfaces() {
 }
 
 # ── обфускация ───────────────────────────────────────────────────────────────
+# Решение «сохранить профиль или выпустить новый» — одно на реальный прогон
+# и на --plan. Две копии условия разошлись бы, а отчёт, разошедшийся с делом,
+# хуже отсутствующего отчёта: ему верят.
+obf_mode() {  # obf_mode <файл профиля> → --apply | --reapply
+    if [ "$RECONFIGURE" != 1 ] && [ -s "$1" ]; then echo --reapply; else echo --apply; fi
+}
+
 gen_obfuscation() {
     local P="${AWG_PRESET:-medium}" T="${AWG_TEMPLATE:-}" F="${AWG_FP:-chrome}"
     # Пусто — слой 3.0 настраивается как 2.0. Именно так выглядит state всех
@@ -710,9 +753,9 @@ gen_obfuscation() {
     # Файл проверяем ДЛЯ КАЖДОГО СЛОЯ отдельно: профили у них разные
     # (obfuscation.env и obfuscation3.env), и общая проверка по первому
     # перевыпускала клиентов слоя 3.0 на установке, где стоит только он.
-    local mode2=--apply mode3=--apply
-    [ "$RECONFIGURE" != 1 ] && [ -s "$AWG_DIR/obfuscation.env"  ] && mode2=--reapply
-    [ "$RECONFIGURE" != 1 ] && [ -s "$AWG_DIR/obfuscation3.env" ] && mode3=--reapply
+    local mode2 mode3
+    mode2="$(obf_mode "$AWG_DIR/obfuscation.env")"
+    mode3="$(obf_mode "$AWG_DIR/obfuscation3.env")"
     if [ "$LAYER2" = 1 ]; then
         log "Профиль обфускации 2.0: preset=$P template=${T:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE2}.conf" "$DEST/awg-obfuscation.sh" \
@@ -827,6 +870,10 @@ ask_bot() {
 
 # ── опрос параметров ─────────────────────────────────────────────────────────
 ask_params() {
+    if [ "$PLAN" = 1 ]; then
+        err "внутренняя ошибка: опрос параметров в режиме --plan"
+        exit 1
+    fi
     if [ -f "$STATE" ] && [ "$RECONFIGURE" != 1 ]; then
         # shellcheck disable=SC1090
         . "$STATE"
@@ -1027,8 +1074,363 @@ menu_installed() {
     esac
 }
 
+# ── сухой прогон ─────────────────────────────────────────────────────────────
+# Главный вопрос перед запуском на работающем сервере один: отвалятся ли
+# клиенты. Ответ зависит от состояния сервера и набора флагов сразу, и держать
+# эту таблицу в голове владелец не обязан.
+
+plan_clients() {  # plan_clients <сервис…> → сколько конфигов выдано
+    local svc n=0
+    local -a f
+    for svc in "$@"; do
+        [ -d "$CLIENT_DIR/$svc" ] || continue
+        # Без find и без трубы: под pipefail ненулевой код find (подкаталог без
+        # прав, файл, удалённый awg-expire прямо во время обхода) оборвал бы
+        # весь отчёт между заголовком и первым разделом — и молча, его
+        # сообщение уже выброшено в /dev/null.
+        f=( "$CLIENT_DIR/$svc"/*-am.conf )
+        [ -e "${f[0]}" ] && n=$(( n + ${#f[@]} ))
+    done
+    echo "$n"
+}
+
+# Пересоберётся ли апстрим — не гадаем, а спрашиваем ровно теми же проверками,
+# что и сборщики: install_kmod смотрит modinfo и метку ревизии, install_awg_go
+# и install_tools сравнивают версию бинарника с пином. Все три вопроса
+# read-only, и врать они не умеют.
+plan_kmod() {
+    modinfo amneziawg >/dev/null 2>&1 || { echo "будет собран (модуля в системе нет)"; return 0; }
+    local have=""
+    [ -f "$KMOD_STAMP" ] && have="$(cut -f1 "$KMOD_STAMP" 2>/dev/null || true)"
+    if [ -z "$AWG_KMOD_REF" ] || [ "$AWG_KMOD_REF" = "$have" ]; then
+        echo "не трогается (${have:-ревизия не помечена})"
+    else
+        echo "ПЕРЕСБОРКА ${have:-?} → $AWG_KMOD_REF, интерфейсы будут погашены"
+    fi
+}
+
+plan_go() {
+    command -v amneziawg-go >/dev/null 2>&1 || { echo "будет собран ($AWG_GO_REF)"; return 0; }
+    local cur; cur="$(amneziawg-go --version 2>&1 | grep -oE 'v[0-9][0-9.]*' | head -1 || true)"
+    if [ "$cur" = "$AWG_GO_REF" ]; then
+        echo "не трогается ($cur)"
+    else
+        echo "ПЕРЕСБОРКА ${cur:-?} → $AWG_GO_REF"
+    fi
+}
+
+plan_tools() {
+    # Зеркалим install_tools целиком, включая её первое условие: одной версии
+    # бинарника мало — собранное из ветки и собранное из тега сообщают одну и
+    # ту же строку, поэтому она спрашивает ещё и чекаут. Половинчатая копия
+    # выдавала «ПЕРЕСБОРКА X → X», то есть правду в форме бессмыслицы.
+    if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1 \
+       || [ ! -d "$SRC/amneziawg-tools" ]; then
+        echo "сборка из исходников ($AWG_TOOLS_REF)"
+        return 0
+    fi
+    local cur cur_ref
+    cur="$(awg --version 2>&1 | grep -oE 'v[0-9][0-9.]*(-[0-9]+)?' | head -1 || true)"
+    cur_ref="$(git -C "$SRC/amneziawg-tools" describe --tags --exact-match 2>/dev/null || true)"
+    if [ "$cur" = "$AWG_TOOLS_REF" ] && [ "$cur_ref" = "$AWG_TOOLS_REF" ]; then
+        echo "не трогаются ($cur)"
+    elif [ "$cur" = "$AWG_TOOLS_REF" ] && [ -n "$cur_ref" ]; then
+        echo "ПЕРЕСБОРКА: версия $cur, но собраны из $cur_ref"
+    else
+        echo "ПЕРЕСБОРКА ${cur:-?} → $AWG_TOOLS_REF"
+    fi
+}
+
+plan_report() {
+    local ver pl2 pl3 n2 n3 m2 m3 op
+
+    # shellcheck disable=SC1090
+    [ -f "$STATE" ] && . "$STATE"
+    # Состав слоёв решает не план, а ask_params: при существующем
+    # install-state.env и без --reconfigure она сорсит файл и выходит РАНЬШЕ
+    # строки AWG_VER="${CLI_VER:-}", то есть --awg в этом прогоне не
+    # применяется вовсе. План обязан повторить это решение буква в букву:
+    # отчёт, обещающий отключение слоя там, где прогон ничего не отключит,
+    # опаснее отсутствующего отчёта — ему верят.
+    if [ -f "$STATE" ] && [ "$RECONFIGURE" != 1 ]; then
+        ver="${AWG_VER:-both}"
+    else
+        ver="${CLI_VER:-${AWG_VER:-both}}"
+    fi
+    case "$ver" in 2|3|both) ;; *) ver=both ;; esac
+    case "$ver" in
+        2) pl2=1; pl3=0 ;;
+        3) pl2=0; pl3=1 ;;
+        *) pl2=1; pl3=1 ;;
+    esac
+
+    if ! installed; then
+        if [ "$UPDATE" = 1 ]; then
+            log "План: ОБНОВЛЯТЬ НЕЧЕГО"
+            log "  $SERVICES нет — сервер ещё не установлен."
+            log "  Тот же запуск без --plan завершится отказом."
+            return 0
+        fi
+        # Проверку портов делает plan_services, а до неё эта ветка не доходит:
+        # без этого `--plan --ports 100,100` отвечал «успех», а тот же запуск
+        # без --plan падал с кодом 2. План обязан отказать там же, где прогон.
+        if ! check_cli_ports; then
+            err "--ports: нужно два разных порта через запятую"
+            err "Тот же запуск без --plan откажет с кодом 2 — план его повторяет"
+            return 2
+        fi
+        log "План: ПЕРВАЯ УСТАНОВКА"
+        echo
+        echo "  Будет создано:"
+        echo "    ! пакеты сборки (apt-get) и утилиты amneziawg-tools"
+        [ "$pl2" = 1 ] && echo "    ! kernel-модуль amneziawg — сборка из исходников"
+        [ "$pl3" = 1 ] && echo "    ! датапас amneziawg-go — сборка из исходников"
+        if [ -n "$CLI_PORTS" ]; then
+            echo "    ! интерфейсы, UDP-порты ${CLI_PORTS%%,*} и ${CLI_PORTS##*,} (закрепляются навсегда)"
+        else
+            echo "    ! интерфейсы, случайные свободные UDP-порты (закрепляются навсегда)"
+        fi
+        echo "    ! ключи сервера и новый профиль обфускации"
+        echo "    ! юниты systemd, симлинки в /usr/local/bin, каталог $DEST"
+        echo
+        log "Выданных клиентов ещё нет — ломать нечего."
+        log "Это только план: ничего не изменено. Запусти ту же команду без --plan."
+        return 0
+    fi
+
+    # Порты и подсети читаются из services.env ровно так же, как их прочтёт
+    # настоящий прогон; на установленном сервере plan_services только сорсит
+    # файл и ничего не считает заново.
+    if ! plan_services >/dev/null 2>&1; then
+        log "⚠️ прочитать $SERVICES не удалось — ниже только то, что известно"
+    fi
+
+    n2="$(plan_clients awg2)"
+    n3="$(plan_clients awg3)"
+    m2="$(obf_mode "$AWG_DIR/obfuscation.env")"
+    m3="$(obf_mode "$AWG_DIR/obfuscation3.env")"
+
+    # Флаги, которые на установленном сервере не доедут никуда. Молча их
+    # проглотить — то же вранье, только тихое: владелец решит, что параметры
+    # он уже поменял. ask_params (для первой группы) и plan_services (для
+    # второй) выходят раньше, чем эти значения читаются.
+    local ignored=""
+    if [ "$RECONFIGURE" != 1 ]; then
+        [ -n "$CLI_VER" ]       && ignored="$ignored --awg"
+        [ -n "$CLI_PRESET" ]    && ignored="$ignored --preset"
+        [ -n "$CLI_TEMPLATE" ]  && ignored="$ignored --template"
+        [ -n "$CLI_FP" ]        && ignored="$ignored --fp"
+        [ -n "$CLI_PRESET3" ]   && ignored="$ignored --preset3"
+        [ -n "$CLI_TEMPLATE3" ] && ignored="$ignored --template3"
+        [ -n "$CLI_HOST" ]      && ignored="$ignored --host"
+    fi
+    [ -n "$CLI_PORTS" ] && ignored="$ignored --ports"
+    [ -n "$CLI_MTU" ]   && ignored="$ignored --mtu"
+    [ -n "$CLI_DNS" ]   && ignored="$ignored --dns"
+
+    # Смена адреса возможна только там, где зовут resolve_endpoint, а зовут её
+    # из ask_params — то есть на первой установке и при --reconfigure.
+    local ep="${ENDPOINT:-}" ep_new=""
+    if [ -n "$CLI_HOST" ] && [ "$RECONFIGURE" = 1 ] && [ "$CLI_HOST" != "$ep" ]; then
+        ep_new="$CLI_HOST"
+    fi
+
+    # plan_services сообщает о принудительном возврате слоя 3.0 на userspace
+    # через log(), а он в отчёте заглушён. Спрашиваем файл сами, ДО того как
+    # она затрёт KMOD3 нулём.
+    local kmod3_was=""
+    kmod3_was="$(grep -o "KMOD3='1'" "$SERVICES" 2>/dev/null || true)"
+
+    if   [ "$UPDATE" = 1 ];      then op="ОБНОВЛЕНИЕ КОДА"
+    elif [ "$RECONFIGURE" = 1 ]; then op="НОВЫЙ ПРОФИЛЬ ОБФУСКАЦИИ"
+    else                              op="ПОВТОРНЫЙ ПРОГОН"
+    fi
+    log "План: $op"
+    # Честно про предел знания плана: --reconfigure заново проводит опрос, и
+    # ответы, которых нет во флагах, пользователь ещё будет вводить руками.
+    # Ниже показаны сохранённые — то есть предположение, а не факт.
+    if [ "$RECONFIGURE" = 1 ]; then
+        log "  --reconfigure переспросит версию, обфускацию и домен (что не задано"
+        log "  флагами); ниже — сохранённые ответы"
+    fi
+    if [ -n "$ignored" ]; then
+        log "⚠️ НЕ будут применены:$ignored"
+        log "   на установленном сервере параметры берутся из install-state.env и"
+        log "   services.env: состав слоёв и профиль меняются только вместе с"
+        log "   --reconfigure, а порты, MTU и DNS не меняются уже никогда"
+    fi
+    echo
+
+    # Слои перечисляем по тому, что будет ПОСЛЕ прогона (pl2/pl3), а не по
+    # тому, что записано сейчас: иначе при --awg 3 отчёт показывал бы порт
+    # слоя 2.0, которого в services.env после прогона уже не будет.
+    local show2="$pl2" show3="$pl3"
+    [ "$UPDATE" = 1 ] && { show2="${LAYER2:-0}"; show3="${LAYER3:-0}"; }
+    echo "  Не изменится:"
+    printf '    ✓ порты          '
+    [ "$show2" = 1 ] && printf '2.0 %s   ' "${PORT2:-?}"
+    [ "$show3" = 1 ] && printf '3.0 %s' "${PORT3:-?}"
+    printf '\n'
+    printf '    ✓ подсети        '
+    [ "$show2" = 1 ] && printf '%s.0/24  ' "${SUBNET2:-?}"
+    [ "$show3" = 1 ] && printf '%s.0/24' "${SUBNET3:-?}"
+    printf '\n'
+    if [ -n "$ep_new" ]; then
+        echo "    ✓ ключи сервера и клиентов"
+    elif [ -z "$ep" ]; then
+        echo "    ✓ ключи сервера и клиентов"
+        echo "    ⚠️ адрес сервера пуст: клиентские конфиги без Endpoint нерабочие"
+    else
+        echo "    ✓ ключи сервера и клиентов, адрес $ep"
+    fi
+    if [ "$UPDATE" = 1 ]; then
+        [ "${LAYER2:-0}" = 1 ] && echo "    ✓ профиль обфускации 2.0"
+        [ "${LAYER3:-0}" = 1 ] && echo "    ✓ профиль обфускации 3.0"
+        # Перечисляем только поднятые слои: строка «3.0: 0» на сервере, где
+        # слоя 3.0 нет, — тот же сорт вранья, что и умолчание.
+        if [ "${LAYER2:-0}" = 1 ] && [ "${LAYER3:-0}" = 1 ]; then
+            echo "    ✓ конфиги клиентов 2.0: $n2, 3.0: $n3 — не пересоздаются"
+        elif [ "${LAYER2:-0}" = 1 ]; then
+            echo "    ✓ конфиги клиентов 2.0: $n2 — не пересоздаются"
+        else
+            echo "    ✓ конфиги клиентов 3.0: $n3 — не пересоздаются"
+        fi
+        echo "    ✓ kernel-модуль и утилиты amneziawg-tools"
+        [ "${LAYER2:-0}" = 1 ] && echo "    ✓ слой 2.0 не перезапускается"
+    else
+        [ "$pl2" = 1 ] && [ "$m2" = --reapply ] && \
+            echo "    ✓ профиль обфускации 2.0 (применяется существующий)"
+        [ "$pl3" = 1 ] && [ "$m3" = --reapply ] && \
+            echo "    ✓ профиль обфускации 3.0 (применяется существующий)"
+        [ "$pl2" = 1 ] && [ "$m2" = --reapply ] && \
+            echo "    ✓ конфиги клиентов 2.0: $n2 — пересоздаются с тем же содержимым"
+        [ "$pl3" = 1 ] && [ "$m3" = --reapply ] && \
+            echo "    ✓ конфиги клиентов 3.0: $n3 — пересоздаются с тем же содержимым"
+    fi
+    echo
+
+    echo "  Изменится:"
+    echo "    ! код в $DEST, юниты systemd, симлинки, бот"
+    # install_base_deps зовётся в main() на КАЖДОМ полном прогоне, и падение
+    # apt обрывает прогон раньше всего остального. Владелец с замороженными
+    # репозиториями должен узнать это из плана, а не из журнала.
+    [ "$UPDATE" = 1 ] || echo "    ! пакеты: apt-get update и доустановка сборочных зависимостей"
+    if [ "$UPDATE" = 1 ]; then
+        [ "${LAYER3:-0}" = 1 ] && echo "    ! датапас amneziawg-go: $(plan_go)"
+        [ "${LAYER3:-0}" = 1 ] && \
+            echo "      при пересборке слой 3.0 перезапускается — короткий разрыв туннелей"
+    else
+        # install_tools в main() вызывается ВСЕГДА, install_kmod — только под
+        # слой 2.0, install_awg_go — только под 3.0. Отчёт повторяет это, иначе
+        # при --awg 3 он умалчивал бы о пересборке утилит.
+        echo "    ! утилиты amneziawg-tools: $(plan_tools)"
+        [ "$pl2" = 1 ] && echo "    ! kernel-модуль: $(plan_kmod)"
+        [ "$pl3" = 1 ] && echo "    ! датапас amneziawg-go: $(plan_go)"
+        # Разрывов на полном прогоне ДВА, и первый делает не install.sh:
+        # awg-obfuscation.sh перезапускает юниты и в режиме --reapply тоже,
+        # а enable_units гасит интерфейс и поднимает заново даже тогда, когда
+        # не изменилось ровно ничего. Обещать «несколько секунд» нельзя:
+        # между ними apt, компиляция и rmmod с ретраями.
+        echo "    ! интерфейсы гасятся и поднимаются заново — связь прервётся дважды:"
+        echo "      сначала это делает awg-obfuscation.sh, затем enable_units;"
+        echo "      сколько займёт весь прогон, заранее не известно — между ними"
+        echo "      apt-get и сборка из исходников"
+        if [ -n "$ep_new" ]; then
+            echo "    ! адрес сервера: ${ep:-?} → $ep_new"
+            echo "      уже выданные конфиги останутся со СТАРЫМ Endpoint: regen-all"
+            echo "      переписывает только обфускацию и [Peer] не трогает —"
+            echo "      их придётся выпустить заново через awg-client"
+        fi
+        if [ -n "$kmod3_was" ] && [ "$pl3" = 1 ]; then
+            echo "    ! слой 3.0 возвращается с kernel-датапаса на userspace:"
+            echo "      awg-quick@${IFACE3:-awg3} гасится, поднимается awg3@${IFACE3:-awg3},"
+            echo "      в services.env ляжет KMOD3=0. Порт, подсеть и ключи прежние —"
+            echo "      выданные конфиги 3.0 остаются рабочими"
+        fi
+        if [ "$pl2" = 1 ] && [ "$m2" = --apply ]; then
+            echo "    ! профиль обфускации 2.0 — НОВЫЙ"
+            echo "    ! конфиги клиентов 2.0: $n2 — все перестанут подключаться"
+        fi
+        if [ "$pl3" = 1 ] && [ "$m3" = --apply ]; then
+            echo "    ! профиль обфускации 3.0 — НОВЫЙ"
+            echo "    ! конфиги клиентов 3.0: $n3 — все перестанут подключаться"
+        fi
+        [ "$pl2" = 1 ] && [ "$m2" = --reapply ] && [ "$pl3" = 1 ] && [ "$m3" = --apply ] && \
+            echo "    (слой 2.0 при этом не затрагивается)"
+        [ "$pl3" = 1 ] && [ "${LAYER3:-0}" = 0 ] && \
+            echo "    ! слой 3.0 добавляется к существующей установке"
+        [ "$pl2" = 1 ] && [ "${LAYER2:-0}" = 0 ] && \
+            echo "    ! слой 2.0 добавляется к существующей установке"
+        # --awg с одним слоем на сервере, где подняты оба, — тихое отключение
+        # второго: write_services запишет LAYER=0, туннель останется поднятым,
+        # но awg-client перестанет его обслуживать. Молчать об этом нельзя.
+        if [ "$pl2" = 0 ] && [ "${LAYER2:-0}" = 1 ]; then
+            echo "    ! слой 2.0 ОТКЛЮЧАЕТСЯ: в services.env ляжет LAYER2=0"
+            echo "      туннель останется поднятым, но awg-client перестанет его"
+            echo "      обслуживать — конфиги 2.0 ($n2 шт.) больше не выпускаются"
+        fi
+        if [ "$pl3" = 0 ] && [ "${LAYER3:-0}" = 1 ]; then
+            echo "    ! слой 3.0 ОТКЛЮЧАЕТСЯ: в services.env ляжет LAYER3=0"
+            echo "      туннель останется поднятым, но awg-client перестанет его"
+            echo "      обслуживать — конфиги 3.0 ($n3 шт.) больше не выпускаются"
+        fi
+    fi
+    echo
+
+    echo "  НЕ будет сделано:"
+    if [ "$UPDATE" = 1 ]; then
+        echo "    ✗ перевыпуск профиля обфускации"
+        echo "    ✗ пересоздание конфигов клиентов"
+        echo "    ✗ смена портов, подсетей и ключей"
+        echo "    ✗ сборка kernel-модуля и утилит"
+        echo "    ✗ apt-get: обновление пакеты не трогает вовсе"
+    else
+        [ "$pl2" = 1 ] && [ "$m2" = --reapply ] && echo "    ✗ перевыпуск профиля обфускации 2.0"
+        [ "$pl3" = 1 ] && [ "$m3" = --reapply ] && echo "    ✗ перевыпуск профиля обфускации 3.0"
+        echo "    ✗ смена портов, подсетей и ключей"
+    fi
+    echo
+
+    if [ "$UPDATE" != 1 ] && { { [ "$pl2" = 1 ] && [ "$m2" = --apply ]; } || \
+       { [ "$pl3" = 1 ] && [ "$m3" = --apply ]; }; }; then
+        log "⚠️ Затронутым клиентам придётся заново скачать и импортировать конфиг."
+    else
+        log "Переимпортировать конфиги никому не придётся."
+    fi
+    log "Это только план: ничего не изменено. Запусти ту же команду без --plan."
+    return 0
+}
+
+# --plan: рассказать, не делая. Отдельная точка входа, потому что main() по
+# дороге успевает и уйти в --update/--uninstall, и открыть меню.
+plan_entry() {
+    local nope=""
+    [ "$UNINSTALL" = 1 ]   && nope="--uninstall"
+    [ "$INSTALL_BOT" = 1 ] && nope="--install-bot"
+    [ "$REMOVE_BOT" = 1 ]  && nope="--remove-bot"
+    if [ -n "$nope" ]; then
+        # Молча выполнить чужую операцию или молча проглотить флаг — оба исхода
+        # плохи одинаково: в первом случае вместо отчёта делается работа, во
+        # втором отчёт не о том, что спрашивали.
+        err "--plan не умеет показывать $nope: у этой операции нет отчёта"
+        err "Запусти её без --plan — или убери $nope, чтобы увидеть план установки"
+        return 2
+    fi
+    plan_report
+}
+
 # ── main ─────────────────────────────────────────────────────────────────────
 main() {
+    # План — раньше всего остального. Ниже уже стоят ветки, которые делают
+    # настоящую работу (--update, --uninstall, меню), и план, дошедший до них,
+    # сделал бы то, о чём его просили только рассказать.
+    if [ "$PLAN" = 1 ]; then
+        # Простой вызов под set -e убил бы оболочку прямо здесь, и exit ниже
+        # не выполнился бы никогда: сегодня код совпадает случайно, но всё,
+        # что допишут между строками, молча пропало бы. В условии errexit снят.
+        plan_entry || exit $?
+        exit 0
+    fi
     if [ "$UNINSTALL" = 1 ]; then uninstall_all; exit 0; fi
     if [ "$REMOVE_BOT" = 1 ]; then remove_bot_only; exit 0; fi
     if [ "$INSTALL_BOT" = 1 ]; then install_bot_only; exit 0; fi
