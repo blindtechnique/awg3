@@ -337,6 +337,32 @@ check_v3_stale() {  # check_v3_stale <путь .v3> <объявлена ли в 
         "файл остался от прежнего профиля — примени текущий заново: awg-obfuscation --v3 --apply"
 }
 
+# ── MTU в выданных конфигах ─────────────────────────────────────────────────
+# regen-all MTU НЕ меняет (он правит только строки обфускации), поэтому после
+# смены MTU выданные конфиги молча остаются на прежнем. Вред тише, чем у порта:
+# соединение встаёт, мелкие запросы ходят, а крупные пакеты пропадают.
+check_client_mtu() {  # check_client_mtu <объявленный MTU> <каталог> <метка>
+    local want="$1" cldir="$2" label="$3" f got n=0 diff_n=0 sample=""
+    [ -n "$want" ] || return 0            # не объявлен — сравнивать не с чем
+    [ -d "$cldir" ] || return 0
+    for f in "$cldir"/*-am.conf; do
+        [ -f "$f" ] || continue
+        got="$(sed -n 's/^MTU *= *//p' "$f" 2>/dev/null | head -1 || true)"
+        [ -n "$got" ] || continue         # в конфиге нет MTU — не наш случай
+        n=$((n + 1))
+        [ "$got" = "$want" ] && continue
+        diff_n=$((diff_n + 1))
+        [ -n "$sample" ] || sample="$(basename "$f") → $got"
+    done
+    [ "$n" = 0 ] && return 0
+    if [ "$diff_n" = 0 ]; then
+        ok "$label: у всех $n конфигов MTU $want"
+    else
+        warn "$label: у $diff_n из $n конфигов другой MTU ($sample), объявлен $want" \
+             "мелкие запросы ходят, крупные пропадают — раздай конфиги заново, regen-all MTU не меняет"
+    fi
+}
+
 check_peers() {  # check_peers <серверный конфиг> <каталог клиентов> <метка>
     local conf="$1" cldir="$2" label="$3"
     [ -f "$conf" ] || return 0
@@ -447,6 +473,7 @@ if [ "$LAYER2" = 1 ]; then
     check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2" PORT2
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
     check_peers "$AWG_DIR/${IFACE2:-awg2}.conf" "$DEST/clients/awg2" "${IFACE2:-awg2}"
+    check_client_mtu "${MTU2:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
 fi
 
 if [ "$LAYER3" = 1 ]; then
@@ -467,6 +494,7 @@ if [ "$LAYER3" = 1 ]; then
     check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3" PORT3
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     check_peers "$AWG_DIR/${IFACE3:-awg3}.conf" "$DEST/clients/awg3" "${IFACE3:-awg3}"
+    check_client_mtu "${MTU3:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     if [ "$KMOD3" = 1 ]; then
         # Известная поломка ветки feat/awg3: политика netlink в модуле объявляет
         # WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL как NLA_U64, а утилиты шлют u32,
