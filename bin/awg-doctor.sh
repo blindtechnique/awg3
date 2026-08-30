@@ -75,6 +75,52 @@ if [ -n "${ENDPOINT:-}" ]; then
 fi
 
 # ── интерфейсы слоёв ────────────────────────────────────────────────────────
+
+# ── инвариант портов ────────────────────────────────────────────────────────
+# Порт живёт в трёх местах сразу: в services.env (объявленный), в серверном
+# конфиге (ListenPort) и в каждом выданном клиенте (Endpoint). Разъехаться они
+# могут молча: правка конфига руками, оборванная миграция, перенос сервера. И
+# тогда «порт не слушается» — это следствие, а не причина, а лечится оно
+# переизданием клиентских конфигов, а не перезапуском сервиса.
+check_ports() {  # check_ports <имя_интерфейса> <объявленный порт> <каталог клиентов>
+    local iface="$1" want="$2" cldir="$3"
+    local conf="$AWG_DIR/${iface}.conf" got n=0 bad_n=0 sample=""
+    [ -n "$want" ] && [ "$want" != 0 ] || { warn "порт $iface не объявлен в services.env"; return; }
+
+    got="$(sed -n 's/^ListenPort *= *//p' "$conf" 2>/dev/null | head -1 || true)"
+    if [ -z "$got" ]; then
+        bad "$conf: нет ListenPort — интерфейс не поднимется"
+    elif [ "$got" != "$want" ]; then
+        bad "$iface: в services.env порт $want, в конфиге $got" \
+            "клиенты стучатся по одному из них, сервер слушает другой"
+    else
+        ok "$iface: порт в конфиге совпадает с объявленным ($want)"
+    fi
+
+    [ -d "$cldir" ] || return 0
+    local f ep
+    for f in "$cldir"/*-am.conf; do
+        [ -f "$f" ] || continue
+        n=$((n + 1))
+        # Endpoint = host:port — порт это хвост после последнего двоеточия,
+        # так что IPv6-адрес в скобках он тоже переживёт.
+        ep="$(sed -n 's/^Endpoint *= *//p' "$f" 2>/dev/null | head -1 || true)"
+        ep="${ep##*:}"
+        [ -n "$ep" ] && [ "$ep" != "$want" ] && {
+            bad_n=$((bad_n + 1))
+            [ -n "$sample" ] || sample="$(basename "$f") → $ep"
+        }
+    done
+    if [ "$n" = 0 ]; then
+        :
+    elif [ "$bad_n" = 0 ]; then
+        ok "$iface: у всех $n выданных конфигов Endpoint на порт $want"
+    else
+        bad "$iface: у $bad_n из $n конфигов Endpoint на чужой порт ($sample)" \
+            "этим клиентам нужно раздать конфиги заново — перезапуск не поможет"
+    fi
+}
+
 check_iface() {  # check_iface <имя> <порт> <подсеть> <слой>
     local i="$1" p="$2" sub="$3" layer="$4" unit peers
     [ "$layer" = 3 ] && unit="$(unit3)" || unit="awg-quick@$i"
@@ -107,6 +153,7 @@ if [ "$LAYER2" = 1 ]; then
     if modinfo amneziawg >/dev/null 2>&1; then ok "модуль amneziawg собран"
     else bad "модуль amneziawg недоступен — dkms status"; fi
     check_iface "${IFACE2:-awg2}" "${PORT2:-0}" "${SUBNET2:-10.29.79}" 2
+    check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2"
 fi
 
 if [ "$LAYER3" = 1 ]; then
@@ -124,6 +171,7 @@ if [ "$LAYER3" = 1 ]; then
         else bad "нет amneziawg-go"; fi
     fi
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
+    check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3"
     if [ "$KMOD3" = 1 ]; then
         # Известная поломка ветки feat/awg3: политика netlink в модуле объявляет
         # WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL как NLA_U64, а утилиты шлют u32,
