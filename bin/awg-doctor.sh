@@ -277,6 +277,20 @@ check_client_hosts() {  # check_client_hosts <объявленный хост> <
 # в del_client), поэтому расхождение достижимо обрывом, а не только переносом.
 # Сверка идёт по КЛЮЧУ, а не по адресу: next_ip переиспользует освободившиеся
 # адреса, и сверка по AllowedIPs дала бы ложное зелёное.
+# ── застрявшие параметры 3.0 ────────────────────────────────────────────────
+# Сверка файла с файлом, без демона: если профиль не объявляет header
+# protection, а рядом с конфигом лежит .v3 с ключом, значит .v3 остался от
+# прежнего профиля. Датапас применит его на ExecStartPost, и сервер разойдётся
+# со всеми выданными конфигами.
+check_v3_stale() {  # check_v3_stale <путь .v3> <объявлена ли в профиле> <пресет>
+    local v3f="$1" want="$2" preset="$3"
+    [ -f "$v3f" ] || return 0
+    grep -q '^header_protection_key=' "$v3f" 2>/dev/null || return 0
+    [ "$want" = 1 ] && return 0
+    bad "$v3f содержит header_protection_key, а профиль $preset его не объявляет" \
+        "файл остался от прежнего профиля — примени текущий заново: awg-obfuscation --v3 --apply"
+}
+
 check_peers() {  # check_peers <серверный конфиг> <каталог клиентов> <метка>
     local conf="$1" cldir="$2" label="$3"
     [ -f "$conf" ] || return 0
@@ -444,27 +458,43 @@ if [ "$LAYER3" = 1 ]; then
         warn "нечем спросить демона: нет $DEST/awg-uapi.py — состояние 3.0 неизвестно"
         v3_live="?"
     fi
+    # Источник истины — ПРОФИЛЬ, а не имя пресета: имя это ярлык, а клиентские
+    # конфиги выписываются по профилю. Решаем так же, как решает генератор
+    # (awg-obfuscation.sh: `[ -n "${AWG_HPK_HEX:-}" ]`), иначе доктор и
+    # генератор разойдутся в понимании одного и того же файла.
+    hpk_want=0
+    # shellcheck disable=SC1090
+    if [ -n "$( . "$AWG_DIR/obfuscation3.env" 2>/dev/null || true; printf '%s' "${AWG_HPK_HEX:-}" )" ]; then
+        hpk_want=1
+    fi
     if [ -z "$v3_live" ]; then
-        warn "${IFACE3:-awg3}: демон не ответил — состояние 3.0 неизвестно"
-        echo "     смотри: journalctl -u awg3@${IFACE3:-awg3} -n 30 --no-pager" >&2
-    elif [ "$hp3" = 1 ]; then
-        ok "header protection применена (пресет ${v3_preset:-?})"
+        warn "${IFACE3:-awg3}: демон не ответил — состояние 3.0 неизвестно" \
+             "смотри: journalctl -u awg3@${IFACE3:-awg3} -n 30 --no-pager"
     elif [ "$v3_live" = "?" ]; then
         :
+    elif [ "$hp3" = 1 ] && [ "$hpk_want" = 1 ]; then
+        ok "header protection применена (пресет ${v3_preset:-?})"
+    elif [ "$hp3" = 1 ]; then
+        # Применена, хотя профиль её не объявляет. Так выглядит застрявший .v3
+        # от прежнего, более сильного профиля: сервер ждёт header protection,
+        # клиентские конфиги выданы без неё — не сходится НИКТО. Раньше здесь
+        # печаталось ok, то есть самый разрушительный исход был зелёным.
+        bad "на интерфейсе есть header protection, а профиль ${v3_preset:-?} её не объявляет" \
+            "клиенты выданы без неё и не подключатся: примени профиль заново — awg-obfuscation --v3 --apply"
+    elif [ "$hpk_want" = 1 ]; then
+        warn "профиль ${v3_preset:-?} объявляет header protection, но на интерфейсе её нет" \
+             "починить: awg-obfuscation --v3 --regenerate --apply"
+        echo "     профиль: $AWG_DIR/obfuscation3.env (ищи AWG_HPK_HEX)" >&2
+        echo "     параметры: $AWG_DIR/${IFACE3:-awg3}.v3" >&2
     else
-        case "$v3_preset" in
-            router|low)
-                ok "пресет $v3_preset — без header protection, так и задумано"
-                echo "     обфускация на уровне 2.0; нужен полный набор 3.0 —" >&2
-                echo "     смени пресет: awg-obfuscation --v3 --preset medium --regenerate --apply" >&2
-                echo "     и раздай клиентам свежие конфиги: awg-client regen-all" >&2 ;;
-            *)
-                warn "пресет ${v3_preset:-?} должен включать header protection, но её нет"
-                echo "     профиль: $AWG_DIR/obfuscation3.env (ищи AWG_HPK_HEX)" >&2
-                echo "     параметры: $AWG_DIR/${IFACE3:-awg3}.v3" >&2
-                echo "     починить: awg-obfuscation --v3 --regenerate --apply" >&2 ;;
-        esac
+        ok "профиль ${v3_preset:-?} — без header protection, так и задумано"
+        echo "     обфускация на уровне 2.0; нужен полный набор 3.0 —" >&2
+        echo "     смени пресет: awg-obfuscation --v3 --preset medium --regenerate --apply" >&2
+        echo "     и раздай клиентам свежие конфиги: awg-client regen-all" >&2
     fi
+    # Та же сверка, но файла с файлом: она работает и тогда, когда демона
+    # спросить нечем, и ловит застрявший .v3 ДО перезапуска датапаса.
+    check_v3_stale "$AWG_DIR/${IFACE3:-awg3}.v3" "$hpk_want" "${v3_preset:-?}"
 fi
 
 # ── профили обфускации ──────────────────────────────────────────────────────
