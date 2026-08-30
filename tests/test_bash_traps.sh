@@ -292,6 +292,10 @@ else
     bash -c "set -euo pipefail
         AWG_DIR='$WORK/etc'; DEST='$WORK/dest'; export BACKUP_PASS=hunter2
         RESTORE_MARK='$WORK/etc/.restore-in-progress'
+        # Замок объявлен на уровне файла, а вырезается только тело функции.
+        # Здесь он не при чём: стенд мерит прерывание, а не блокировку —
+        # её проверяет tests/test_restore_integrity.sh на настоящем скрипте.
+        lock_wait() { :; }; lock_drop() { :; }
         log() { :; }; err() { printf '%s\n' \"\$*\" >&2; }
         systemctl() { :; }
         $DR
