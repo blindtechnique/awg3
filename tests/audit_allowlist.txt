@@ -5,8 +5,12 @@
 #
 # Если код изменится, строка перестанет к чему-либо относиться, и аудит
 # сообщит об этом отдельно — чтобы список не гнил.
+bin/awg-client.sh :: pipe-fallible :: cpriv="$(awg genkey)"; cpub="$(printf '%s' "$cpriv" | awg pubkey)" :: отказ awg genkey означает сломанные утилиты — продолжать создание клиента нечем, и смерть здесь верный исход
+bin/awg-client.sh :: pipe-fallible :: cpub="$(printf '%s' "$cpriv" | awg pubkey)" \ :: отказ закрыт `|| die` в той же строке: и сообщение, и код уходят вызывающему
+bin/awg-client.sh :: pipe-fallible :: printf '%s' "$priv" | awg pubkey :: последняя команда server_pubkey: её код и есть ответ, вызывающий закрывает его `|| die`
 bin/awg-datapath.sh :: colon-plus-flag :: log "$IFACE настроен (MTU ${MTU:-1380}${SUBNET:+, подсеть $SUBNET}${NAT:+, NAT=$NAT})" :: строка лога: NAT это 0 или 1, и «NAT=0» в сообщении читается верно; на поведение не влияет
 bin/awg-datapath.sh :: pipe-fallible :: awg-quick strip "$IFACE" | grep -vE '^__AWG3?_OBFUSCATION__$' > "$stripped" :: отказ awg-quick strip означает отсутствующий конфиг интерфейса — продолжать в этом случае нечего, смерть здесь и есть верный исход
+bin/awg-doctor.sh :: pipe-fallible :: "$(awg genkey)" "$(awg genkey | awg pubkey)" > "$probe_conf" :: файл идёт без set -e, и это подставной конфиг для разовой проверки
 bin/awg-doctor.sh :: pipe-fallible :: conf="$(ls -1 "$DEST/clients/$svc"/*"$tmp"*-am.conf 2>/dev/null | head -1)" :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
 bin/awg-doctor.sh :: pipe-fallible :: hs="$(ip netns exec "$ns" awg show "$dev" latest-handshakes 2>/dev/null | awk '{print $2}')" :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
 bin/awg-doctor.sh :: pipe-fallible :: n="$(ls -1 "$DEST/clients/$svc"/*-am.conf 2>/dev/null | wc -l)" :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
@@ -21,3 +25,5 @@ bin/awg-upstream-check.sh :: pipe-predicate :: if printf '%s' "$hdr" | grep -q W
 bin/awg-upstream-check.sh :: pipe-predicate :: if printf '%s' "$hdr" | grep -q WGDEVICE_A_RANDOM_TRAILERS; then :: producer это printf одной переменной с заголовочным файлом апстрима (десятки КБ) — меньше 64 КБ буфера трубы, SIGPIPE не наступает
 install.sh :: pipe-fallible :: "$REPO_DIR/bot/bot.env.template" | grep -v '^#' :: grep -v по нашему же шаблону: в нём есть строки без решётки, иначе бот всё равно не поднялся бы
 install.sh :: pipe-fallible :: -h|--help) grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;; :: grep по собственному файлу: шебанг и шапка есть всегда, совпадение гарантировано
+install.sh :: pipe-fallible :: log "Go уже установлен: $(go version | awk '{print $3}')" :: подстановка в АРГУМЕНТЕ команды: измерено, что её отказ не роняет вызывающего (в отличие от присваивания)
+install.sh :: pipe-fallible :: log "Go установлен: $(go version | awk '{print $3}')" :: подстановка в АРГУМЕНТЕ команды: измерено, что её отказ не роняет вызывающего (в отличие от присваивания)

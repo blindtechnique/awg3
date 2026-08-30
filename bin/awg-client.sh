@@ -136,6 +136,17 @@ add_client() {
     [ -n "$host" ] || host="$(curl -4 -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
     dns="${DNS:-1.1.1.1, 8.8.8.8}"
 
+    # Ключ сервера берём ДО рендера, обычным присваиванием: die внутри $( ) в
+    # heredoc убивает только подоболочку — cat дописал бы «PublicKey = »
+    # пустым, и клиент получил бы заведомо нерабочий профиль со словом
+    # «создан». Здесь отказ виден вызывающему.
+    # `|| die` на самом присваивании: без него отказ `awg pubkey` (в отличие от
+    # отсутствия ключа, которое ловит сама server_pubkey) убивал бы add_client
+    # молча, и проверка на пустоту ниже стала бы недостижимой. Измерено:
+    # plain-присваивание с упавшей подстановкой под set -e роняет скрипт.
+    local spub
+    spub="$(server_pubkey)" || die "не удалось получить публичный ключ сервера — клиент не создан"
+    [ -n "$spub" ] || die "публичный ключ сервера пуст — клиент не создан"
     umask 077
     cat > "$conf" <<EOF
 [Interface]
@@ -146,7 +157,7 @@ MTU = ${MTU}
 ${AWG_OBFUSCATION}
 
 [Peer]
-PublicKey = $(server_pubkey)
+PublicKey = ${spub}
 PresharedKey = ${cpsk}
 Endpoint = ${host}:${PORT}
 AllowedIPs = 0.0.0.0/0, ::/0
@@ -215,11 +226,22 @@ del_client() {
     # удаление умирало без единой строки вывода. В az-awg2 уже исправлено.
     cpriv="$(grep '^PrivateKey' "$conf" | head -1 | cut -d= -f2- | tr -d ' \t' || true)"
     [ -n "$cpriv" ] || die "в конфиге '$conf' нет PrivateKey — по ключу удалять нечего"
-    cpub="$(printf '%s' "$cpriv" | awg pubkey)"
+    # Проверять здесь обязательно, и вот почему. expire_check зовёт del_client
+    # левым операндом ||, а в таком вызове errexit подавлен на ВСЁ тело
+    # функции: отказ `awg pubkey` не остановил бы удаление, а оставил бы cpub
+    # пустым. Фильтр ниже ищет вхождение подстроки, и пустая входит в любой
+    # блок — серверный конфиг вычищался бы целиком, молча, из-под таймера.
+    cpub="$(printf '%s' "$cpriv" | awg pubkey)" \
+        || die "не удалось вывести публичный ключ клиента из '$conf'"
+    [ -n "$cpub" ] || die "пустой публичный ключ клиента ('$conf') — серверный конфиг не трогаю"
     awg set "$IFACE" peer "$cpub" remove 2>/dev/null || true
     python3 - "$SERVER_CONF" "$cpub" <<'PY'
 import sys
 path, pub = sys.argv[1], sys.argv[2]
+# Пустой ключ сюда попасть уже не может, но цена ошибки — стёртый серверный
+# конфиг, поэтому проверяем ещё раз: пустая подстрока входит в любой блок.
+if not pub:
+    sys.exit("пустой PublicKey — фильтр совпал бы со всем файлом")
 blocks, cur = [], []
 for line in open(path, encoding="utf-8").read().splitlines():
     if line.strip().startswith("[Peer]"):
@@ -330,7 +352,11 @@ expire_check() {
         [ -n "$name" ] || continue
         if [ "$now" -ge "$when" ] 2>/dev/null; then
             log "срок клиента '$name' ($svc) истёк — удаляю"
-            del_client "$name" "$svc" >/dev/null 2>&1 || true
+            # Подоболочка обязательна: die внутри del_client — это exit, и он
+            # оборвал бы ВЕСЬ прогон до mv ниже, оставив список просроченных
+            # нетронутым, а остальных — неудалёнными.
+            ( del_client "$name" "$svc" >/dev/null ) \
+                || log "клиента '$name' удалить не удалось — см. ошибку выше"
         else
             printf '%s\t%s\t%s\n' "$name" "$svc" "$when" >> "$tmp"
         fi
