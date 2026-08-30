@@ -416,6 +416,48 @@ check_live() {  # check_live <имя интерфейса> <серверный �
     return 0
 }
 
+# ── копия параметров для датапаса ───────────────────────────────────────────
+# <iface>.env пишет установщик, а читает датапас, поднимая интерфейс. Если она
+# разошлась с services.env, датапас настроит интерфейс по своей копии, а весь
+# остальной проект будет считать иначе — и никто об этом не скажет.
+check_iface_env() {  # check_iface_env <иф> <подсеть> <порт> <mtu> <wan>
+    local i="$1" want_sub="$2" want_port="$3" want_mtu="$4" want_wan="$5"
+    local f="$AWG_DIR/${i}.env" got nat
+    [ -f "$f" ] || return 0            # нет файла — датапас и не работает
+    _fld() { sed -n "s/^$1=//p" "$f" 2>/dev/null | head -1 || true; }
+    nat="$(_fld NAT)"
+
+    got="$(_fld SUBNET)"
+    if [ -n "$got" ] && [ -n "$want_sub" ] && [ "$got" != "${want_sub}.0/24" ]; then
+        if [ "${nat:-0}" = 1 ]; then
+            bad "$i: в $f подсеть $got, а объявлена ${want_sub}.0/24" \
+                "MASQUERADE встанет на чужой диапазон — клиенты подключатся, интернета не увидят"
+        else
+            warn "$i: в $f подсеть $got, а объявлена ${want_sub}.0/24" \
+                 "сейчас копия инертна (NAT=0, за него отвечает ваниль), но она устарела"
+        fi
+    fi
+
+    got="$(_fld PORT)"
+    if [ -n "$got" ] && [ -n "$want_port" ] && [ "$got" != "$want_port" ]; then
+        bad "$i: в $f порт $got, а объявлен $want_port" \
+            "интерфейс слушает не там, куда стучатся выданные конфиги"
+    fi
+
+    got="$(_fld MTU)"
+    if [ -n "$got" ] && [ -n "$want_mtu" ] && [ "$got" != "$want_mtu" ]; then
+        warn "$i: в $f MTU $got, а объявлен $want_mtu" \
+             "интерфейс поднимется с чужим MTU — крупные пакеты будут пропадать"
+    fi
+
+    got="$(_fld WAN)"
+    if [ -n "$got" ] && [ -n "$want_wan" ] && [ "$got" != "$want_wan" ]; then
+        bad "$i: в $f внешний интерфейс $got, а объявлен $want_wan" \
+            "MASQUERADE встанет на чужой выход — трафик клиентов наружу не пойдёт"
+    fi
+    return 0
+}
+
 check_peers() {  # check_peers <серверный конфиг> <каталог клиентов> <метка>
     local conf="$1" cldir="$2" label="$3"
     [ -f "$conf" ] || return 0
@@ -524,6 +566,7 @@ if [ "$LAYER2" = 1 ]; then
     else bad "модуль amneziawg недоступен — dkms status"; fi
     check_iface "${IFACE2:-awg2}" "${PORT2:-0}" "${SUBNET2:-10.29.79}" 2
     check_live "${IFACE2:-awg2}" "$AWG_DIR/${IFACE2:-awg2}.conf"
+    check_iface_env "${IFACE2:-awg2}" "${SUBNET2:-}" "${PORT2:-}" "${MTU2:-}" "${WAN:-}"
     check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2" PORT2
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
     check_peers "$AWG_DIR/${IFACE2:-awg2}.conf" "$DEST/clients/awg2" "${IFACE2:-awg2}"
@@ -546,6 +589,7 @@ if [ "$LAYER3" = 1 ]; then
     fi
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
     check_live "${IFACE3:-awg3}" "$AWG_DIR/${IFACE3:-awg3}.conf"
+    check_iface_env "${IFACE3:-awg3}" "${SUBNET3:-}" "${PORT3:-}" "${MTU3:-}" "${WAN:-}"
     check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3" PORT3
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     check_peers "$AWG_DIR/${IFACE3:-awg3}.conf" "$DEST/clients/awg3" "${IFACE3:-awg3}"
