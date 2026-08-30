@@ -131,6 +131,74 @@ sum2="$(cat "$D"/dest/clients/awg2/*-am.conf | md5sum)"
 [ "$sum1" = "$sum2" ] && ok "повторный прогон не изменил ни байта" \
     || bad "прогон меняет конфиги каждый раз" "владелец будет думать, что клиентам пора раздавать новые"
 
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "3. Восстановление, убитое между копированием ключей и клиентов"
+# Все cp внутри do_restore идут с `|| true`, поэтому отказом команды операцию
+# не прервать — она просто поехала бы дальше. Изображаем настоящее убийство:
+# заглушка cp делает kill -9 родителю на N-м вызове. Так выглядят оборванный
+# ssh, OOM и ребут, и заодно видно, что бывает, когда trap уже не выполнится.
+DR="$(sed -n '/^do_restore()/,/^}$/p' bin/awg-backup.sh)"
+if [ -z "$DR" ]; then
+    bad "не нашли do_restore" "мерить нечего"
+else
+    R="$WORK/restore"
+    mkdir -p "$R/stage/amneziawg" "$R/stage/clients" "$R/etc" "$R/dest/clients"
+    echo backup > "$R/stage/MANIFEST"
+    printf 'PrivateKey = ИЗ_БЭКАПА\n' > "$R/stage/amneziawg/awg2.conf"
+    printf 'PrivateKey = КЛИЕНТ_ИЗ_БЭКАПА\n' > "$R/stage/clients/c1-am.conf"
+    ( cd "$R/stage" && tar -czf "$R/bk.tar.gz" . )
+
+    # живое состояние делаем заведомо ДРУГИМ, чтобы отличать восстановленное
+    printf 'PrivateKey = ЖИВОЙ\n' > "$R/etc/awg2.conf"
+    printf 'PrivateKey = ЖИВОЙ_КЛИЕНТ\n' > "$R/dest/clients/c1-am.conf"
+
+    CPSTUB="$WORK/cpstub"; mkdir -p "$CPSTUB"
+    {
+        echo '#!/bin/bash'
+        echo 'n=$(( $(cat "$CP_COUNT" 2>/dev/null || echo 0) + 1 ))'
+        echo 'echo "$n" > "$CP_COUNT"'
+        echo '[ "$n" -ge "$CP_DIE_AT" ] && { kill -9 "$PPID"; sleep 5; }'
+        echo 'exec /usr/bin/cp "$@"'
+    } > "$CPSTUB/cp"
+    chmod +x "$CPSTUB/cp"
+
+    run_restore() {  # run_restore <умереть на N-м cp | 0 = не умирать>
+        local pfx=""
+        [ "$1" != 0 ] && pfx="$CPSTUB:"
+        echo 0 > "$WORK/cpcnt"
+        PATH="${pfx}$PATH" CP_COUNT="$WORK/cpcnt" CP_DIE_AT="$1" \
+        bash -c "set -euo pipefail
+            AWG_DIR=$R/etc; DEST=$R/dest; AZ=$R/az
+            log() { :; }; err() { :; }; systemctl() { :; }
+            $DR
+            do_restore $R/bk.tar.gz" >/dev/null 2>&1
+    }
+
+    # Сообщение оболочки о сигнале глушим здесь: оно от родителя, а не
+    # от самой операции, и в отчёте только мешает.
+    { run_restore 2 || true; } 2>/dev/null
+    k="$(cat "$R/etc/awg2.conf" 2>/dev/null || true)"
+    c="$(cat "$R/dest/clients/c1-am.conf" 2>/dev/null || true)"
+    case "$k" in
+        *ИЗ_БЭКАПА*)
+            case "$c" in
+                *ЖИВОЙ*) ok "состояние рассогласовано, как и задумано: ключи из бэкапа, клиенты прежние" ;;
+                *) bad "клиенты успели восстановиться" "прерывание слишком позднее" ;;
+            esac ;;
+        *) bad "ключи не восстановились" "прерывание слишком раннее: [$k]" ;;
+    esac
+
+    run_restore 0 && rc=0 || rc=$?
+    k="$(cat "$R/etc/awg2.conf" 2>/dev/null || true)"
+    c="$(cat "$R/dest/clients/c1-am.conf" 2>/dev/null || true)"
+    [ "$rc" = 0 ] && ok "повторное восстановление отработало успешно" \
+        || bad "повторное восстановление отказало (код $rc)"
+    case "$k$c" in
+        *ЖИВОЙ*) bad "после повторного запуска остались куски прежнего состояния" "[$k] [$c]" ;;
+        *) ok "повторный запуск довёл восстановление до конца" ;;
+    esac
+fi
+
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"
 exit $fail
