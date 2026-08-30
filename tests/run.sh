@@ -91,6 +91,10 @@ run "приоритет явных флагов над сохранённым п
 run "перезапуск после --apply и код возврата" \
     bash tests/test_obf_restart.sh bin/awg-obfuscation.sh
 
+head_ "Адрес сервера"
+run "сверка хоста у клиентов и молчание там, где ответ недоказуем" \
+    bash tests/test_endpoint.sh
+
 head_ "Бэкап и восстановление"
 run "архив содержит клиентские ключи, а отказ доезжает до кода возврата" \
     bash tests/test_restore_integrity.sh

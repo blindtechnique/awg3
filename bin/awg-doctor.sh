@@ -93,19 +93,54 @@ else bad "внешний интерфейс '${WAN:-не задан}' не на�
 if command -v awg >/dev/null 2>&1; then ok "amneziawg-tools: $(awg --version 2>&1 | head -1)"
 else bad "нет утилиты awg"; fi
 
-if [ -n "${ENDPOINT:-}" ]; then
+# Обёрнуто в функцию, чтобы стенд вырезал её sed-ом, как check_ports.
+check_endpoint() {
+    [ -n "${ENDPOINT:-}" ] || return 0
+    local ip locals got a hit=0
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)"
+    # Приватный src означает NAT: машина ПРИНЦИПИАЛЬНО не знает своего внешнего
+    # адреса без сети, и сравнивать не с чем. Без этого фильтра на облаках с
+    # приватным NIC (AWS/GCP/Oracle, CGNAT) домен никогда не равен ip, и доктор
+    # печатал warn на каждом запуске исправного сервера — а жёлтые строки,
+    # которые горят всегда, перестают читать вместе с той, что появится при
+    # настоящем переезде. Фильтр тот же, что у detect_public_ip в install.sh.
+    case "$ip" in 10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*|127.*|169.254.*|0.0.0.0|"") ip="" ;; esac
+    # Все адреса машины, а не только src: плавающий адрес может висеть на
+    # другом интерфейсе, и сверка только с src дала бы ложную тревогу.
+    locals="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' \
+              | cut -d/ -f1 | tr '\n' ' ' || true)"
     case "$ENDPOINT" in
         *[a-zA-Z]*)
             # getent отдаёт 2 на нерезолвящемся имени — штатный ответ.
-            got="$(getent ahostsv4 "$ENDPOINT" 2>/dev/null | awk '{print $1; exit}' || true)"
-            if [ -z "$got" ]; then bad "домен $ENDPOINT не резолвится — клиенты не найдут сервер"
-            elif [ -n "$ip" ] && [ "$got" != "$ip" ]; then
-                warn "домен $ENDPOINT указывает на $got, а адрес сервера $ip"
-            else ok "домен $ENDPOINT резолвится в $got"; fi ;;
+            # Берём ВСЕ A-записи, а не первую: при round-robin порядок в ответе
+            # ротируется, и сверка с первой ходила бы между ok и warn от
+            # запуска к запуску на одном и том же исправном сервере.
+            # Два шага, а не один конвейер: getent отдаёт 2 на
+            # нерезолвящемся имени, и под pipefail `|| true` обязан стоять
+            # на той же физической строке, что и труба, — иначе он не
+            # защищает и не виден аудиту.
+            got="$(getent ahostsv4 "$ENDPOINT" 2>/dev/null || true)"
+            got="$(printf '%s\n' "$got" | awk '{print $1}' | sort -u | tr '\n' ' ')"
+            if [ -z "$got" ]; then
+                bad "домен $ENDPOINT не резолвится — клиенты не найдут сервер"
+            elif [ -z "$ip" ]; then
+                # Объяснение обязательно: без него `ok` выглядит как пройденная
+                # проверка, которой на самом деле не было.
+                ok "домен $ENDPOINT резолвится в ${got% } (свой внешний адрес машине неизвестен — за NAT, сверка с ним не делалась)"
+            else
+                for a in $got; do
+                    case " $locals $ip " in *" $a "*) hit=1 ;; esac
+                done
+                if [ "$hit" = 1 ]; then ok "домен $ENDPOINT резолвится в адрес этой машины"
+                else warn "домен $ENDPOINT указывает на ${got% }, а у машины ${locals% } — если адрес не плавающий, проверь DNS"; fi
+            fi ;;
+        # Голый IP не сверяем с адресом машины сознательно: на облаке за NAT
+        # или с плавающим адресом это безусловная ложная тревога, а объявленное
+        # владельцем значение мы не оспариваем.
         *) ok "адрес сервера: $ENDPOINT" ;;
     esac
-fi
+}
+check_endpoint
 
 # ── интерфейсы слоёв ────────────────────────────────────────────────────────
 
@@ -154,6 +189,65 @@ check_ports() {  # check_ports <имя_интерфейса> <объявленн
     fi
 }
 
+
+# ── хост в выданных конфигах ────────────────────────────────────────────────
+# Endpoint пишется ровно в одном месте (add_client) и всегда из единственного
+# объявленного хоста. Значит несовпадение — всегда настоящее расхождение, и
+# сверка эта не ходит в сеть: файл против файла, без ложных тревог за NAT.
+# regen-all его НЕ чинит: он правит только строки обфускации, сохраняя ключи,
+# IP и peer, — поэтому в подсказке сказано «раздать заново», а не «пересобрать».
+ep_host() {  # ep_host <строка Endpoint без имени поля>
+    local e="$1"
+    case "$e" in
+        "[""$"*|"["*) e="${e#[}"; printf '%s' "${e%%]*}"; return ;;
+    esac
+    # хост — всё до ПОСЛЕДНЕГО двоеточия; без двоеточий вся строка (битый
+    # Endpoint без порта тоже надо увидеть, а не молча принять за хост)
+    case "$e" in
+        *:*) printf '%s' "${e%:*}" ;;
+        *)   printf '%s' "$e" ;;
+    esac
+}
+# Скобки снимаются с ОБЕИХ сторон: ep_host отдаёт адрес уже без них, а
+# объявленное значение может быть записано и так, и так — иначе одна и та
+# же машина выглядела бы расхождением сама с собой.
+norm_host() { printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/\.$//; s/^\[//; s/\]$//'; }
+
+check_client_hosts() {  # check_client_hosts <объявленный хост> <каталог> <метка>
+    local cldir="$2" label="$3" f raw h n=0 diff_n=0 sample="" broken=0
+    local want; want="$(norm_host "$1")"
+    [ -d "$cldir" ] || return 0
+    for f in "$cldir"/*-am.conf; do
+        [ -f "$f" ] || continue
+        raw="$(sed -n 's/^Endpoint *= *//p' "$f" 2>/dev/null | head -1 || true)"
+        [ -n "$raw" ] || continue          # нет Endpoint — не наш файл
+        h="$(norm_host "$(ep_host "$raw")")"
+        if [ -z "$h" ]; then
+            bad "$(basename "$f"): в Endpoint нет адреса сервера ($raw)" \
+                "этот конфиг не подключится ни при каких настройках"
+            broken=$((broken + 1))
+            continue
+        fi
+        n=$((n + 1))
+        [ -n "$want" ] || continue          # объявленного нет — сравнивать не с чем
+        if [ "$h" != "$want" ]; then
+            diff_n=$((diff_n + 1))
+            [ -n "$sample" ] || sample="$(basename "$f") → $h"
+        fi
+    done
+    [ "$n" = 0 ] && return 0
+    if [ -z "$want" ]; then
+        [ "$broken" = 0 ] && return 0
+        return 0
+    fi
+    if [ "$diff_n" = 0 ]; then
+        ok "$label: у всех $n конфигов Endpoint на $want"
+    else
+        warn "$label: $diff_n из $n конфигов выданы на другой адрес ($sample), объявлен $want"
+        warn "  этим клиентам надо раздать конфиги заново — regen-all адрес не меняет"
+    fi
+}
+
 check_iface() {  # check_iface <имя> <порт> <подсеть> <слой>
     local i="$1" p="$2" sub="$3" layer="$4" unit peers
     [ "$layer" = 3 ] && unit="$(unit3)" || unit="awg-quick@$i"
@@ -187,6 +281,7 @@ if [ "$LAYER2" = 1 ]; then
     else bad "модуль amneziawg недоступен — dkms status"; fi
     check_iface "${IFACE2:-awg2}" "${PORT2:-0}" "${SUBNET2:-10.29.79}" 2
     check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2"
+    check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
 fi
 
 if [ "$LAYER3" = 1 ]; then
@@ -205,6 +300,7 @@ if [ "$LAYER3" = 1 ]; then
     fi
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
     check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3"
+    check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     if [ "$KMOD3" = 1 ]; then
         # Известная поломка ветки feat/awg3: политика netlink в модуле объявляет
         # WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL как NLA_U64, а утилиты шлют u32,
