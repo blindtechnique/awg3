@@ -363,6 +363,59 @@ check_client_mtu() {  # check_client_mtu <объявленный MTU> <ката�
     fi
 }
 
+# ── живой интерфейс против конфига ──────────────────────────────────────────
+# check_peers сверяет файлы между собой. Здесь — файл против ЯДРА: на диске
+# может быть всё согласовано, а интерфейс поднят из прежнего состояния. Так
+# выглядит «конфиг переписали, а awg setconf не сделали», и именно это остаётся
+# после восстановления, убитого между копированием файлов и перезапуском.
+check_live() {  # check_live <имя интерфейса> <серверный конфиг>
+    local i="$1" conf="$2"
+    [ -f "$conf" ] || return 0
+    command -v awg >/dev/null 2>&1 || return 0
+    ip link show "$i" >/dev/null 2>&1 || return 0   # не поднят — сказала check_iface
+
+    local live_pub disk_priv disk_pub
+    live_pub="$(awg show "$i" public-key 2>/dev/null || true)"
+    disk_priv="$(sed -n 's/^PrivateKey *= *//p' "$conf" 2>/dev/null | head -1 || true)"
+    disk_pub=""
+    [ -n "$disk_priv" ] && disk_pub="$(printf '%s' "$disk_priv" | awg pubkey 2>/dev/null || true)"
+    if [ -n "$live_pub" ] && [ -n "$disk_pub" ]; then
+        if [ "$live_pub" = "$disk_pub" ]; then
+            ok "$i: интерфейс поднят из нынешнего конфига"
+        else
+            bad "$i: интерфейс работает по ДРУГОМУ ключу, чем в $conf" \
+                "конфиг переписан, а интерфейс не перезапущен — клиенты по нему не сойдутся"
+        fi
+    fi
+
+    local live_peers conf_peers p n_only_conf=0 n_only_live=0
+    live_peers="$(awg show "$i" peers 2>/dev/null | tr '\n' ' ' || true)"
+    conf_peers="$(sed -n 's/^PublicKey *= *//p' "$conf" 2>/dev/null | tr '\n' ' ' || true)"
+    for p in $conf_peers; do
+        case " $live_peers " in
+            *" $p "*) ;;
+            *) n_only_conf=$((n_only_conf + 1)) ;;
+        esac
+    done
+    for p in $live_peers; do
+        case " $conf_peers " in
+            *" $p "*) ;;
+            *) n_only_live=$((n_only_live + 1)) ;;
+        esac
+    done
+    if [ "$n_only_conf" != 0 ]; then
+        bad "$i: $n_only_conf пиров есть в конфиге, но не загружены в интерфейс" \
+            "эти клиенты не подключатся до перезапуска: systemctl restart на юните слоя"
+    fi
+    if [ "$n_only_live" != 0 ]; then
+        warn "$i: $n_only_live пиров загружены в интерфейс, но их нет в конфиге" \
+             "доступ переживёт только до перезапуска — добавь их в конфиг или убери"
+    fi
+    [ "$n_only_conf" = 0 ] && [ "$n_only_live" = 0 ] && [ -n "$conf_peers$live_peers" ] \
+        && ok "$i: пиры в ядре и в конфиге совпадают"
+    return 0
+}
+
 check_peers() {  # check_peers <серверный конфиг> <каталог клиентов> <метка>
     local conf="$1" cldir="$2" label="$3"
     [ -f "$conf" ] || return 0
@@ -470,6 +523,7 @@ if [ "$LAYER2" = 1 ]; then
     if modinfo amneziawg >/dev/null 2>&1; then ok "модуль amneziawg собран"
     else bad "модуль amneziawg недоступен — dkms status"; fi
     check_iface "${IFACE2:-awg2}" "${PORT2:-0}" "${SUBNET2:-10.29.79}" 2
+    check_live "${IFACE2:-awg2}" "$AWG_DIR/${IFACE2:-awg2}.conf"
     check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2" PORT2
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
     check_peers "$AWG_DIR/${IFACE2:-awg2}.conf" "$DEST/clients/awg2" "${IFACE2:-awg2}"
@@ -491,6 +545,7 @@ if [ "$LAYER3" = 1 ]; then
         else bad "нет amneziawg-go"; fi
     fi
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
+    check_live "${IFACE3:-awg3}" "$AWG_DIR/${IFACE3:-awg3}.conf"
     check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3" PORT3
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     check_peers "$AWG_DIR/${IFACE3:-awg3}.conf" "$DEST/clients/awg3" "${IFACE3:-awg3}"
