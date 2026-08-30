@@ -91,6 +91,10 @@ run "приоритет явных флагов над сохранённым п
 run "перезапуск после --apply и код возврата" \
     bash tests/test_obf_restart.sh bin/awg-obfuscation.sh
 
+head_ "Бэкап и восстановление"
+run "архив содержит клиентские ключи, а отказ доезжает до кода возврата" \
+    bash tests/test_restore_integrity.sh
+
 head_ "Диагностика"
 run "слой 3.0: «ключа нет» отличается от «спросить не удалось»" \
     bash tests/test_doctor_v3.sh bin/awg-doctor.sh

@@ -142,10 +142,14 @@ if [ -z "$DR" ]; then
     bad "не нашли do_restore" "мерить нечего"
 else
     R="$WORK/restore"
-    mkdir -p "$R/stage/amneziawg" "$R/stage/clients" "$R/etc" "$R/dest/clients"
+    mkdir -p "$R/stage/amneziawg" "$R/stage/clients" "$R/stage/state" \
+             "$R/etc" "$R/dest/clients"
     echo backup > "$R/stage/MANIFEST"
     printf 'PrivateKey = ИЗ_БЭКАПА\n' > "$R/stage/amneziawg/awg2.conf"
     printf 'PrivateKey = КЛИЕНТ_ИЗ_БЭКАПА\n' > "$R/stage/clients/c1-am.conf"
+    # Настоящий архив всегда несёт services.env, а восстановление теперь вслух
+    # жалуется на его отсутствие. Стенд мерит прерывание, а не полноту архива.
+    printf 'LAYER2=1\nIFACE2=awg2\n' > "$R/stage/amneziawg/services.env"
     ( cd "$R/stage" && tar -czf "$R/bk.tar.gz" . )
 
     # живое состояние делаем заведомо ДРУГИМ, чтобы отличать восстановленное
@@ -166,9 +170,12 @@ else
         local pfx=""
         [ "$1" != 0 ] && pfx="$CPSTUB:"
         echo 0 > "$WORK/cpcnt"
+        # RESTORE_MARK объявлен на уровне файла, а вырезается только тело
+        # функции — без этой строки кусок падает под set -u на первой же записи.
         PATH="${pfx}$PATH" CP_COUNT="$WORK/cpcnt" CP_DIE_AT="$1" \
         bash -c "set -euo pipefail
             AWG_DIR=$R/etc; DEST=$R/dest; AZ=$R/az
+            RESTORE_MARK=$R/etc/.restore-in-progress
             log() { :; }; err() { :; }; systemctl() { :; }
             $DR
             do_restore $R/bk.tar.gz" >/dev/null 2>&1

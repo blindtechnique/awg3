@@ -279,12 +279,19 @@ else
     mkdir -p "$WORK/stage/amneziawg" "$WORK/stage/clients" "$WORK/stage/state"
     echo "awg3" > "$WORK/stage/MANIFEST"
     echo "PrivateKey = SECRET" > "$WORK/stage/amneziawg/awg2.conf"
+    # Настоящий архив всегда несёт services.env и клиентские конфиги, а
+    # восстановление теперь вслух жалуется на их отсутствие. Раздел мерит
+    # гигиену /tmp, а не полноту архива, — обставляем стенд как настоящий.
+    printf 'LAYER2=1\nIFACE2=awg2\n' > "$WORK/stage/amneziawg/services.env"
+    mkdir -p "$WORK/stage/clients/awg2"
+    printf 'PrivateKey = CL1\n' > "$WORK/stage/clients/awg2/awg2-c1-am.conf"
     tar -czf "$WORK/bk.tar.gz" -C "$WORK/stage" .
     PW=hunter2 openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
         -in "$WORK/bk.tar.gz" -out "$WORK/bk.tar.gz.enc" -pass env:PW 2>/dev/null
     rm -f /tmp/awg-restore.*          # mktemp в do_restore жёстко в /tmp
     bash -c "set -euo pipefail
         AWG_DIR='$WORK/etc'; DEST='$WORK/dest'; export BACKUP_PASS=hunter2
+        RESTORE_MARK='$WORK/etc/.restore-in-progress'
         log() { :; }; err() { printf '%s\n' \"\$*\" >&2; }
         systemctl() { :; }
         $DR
