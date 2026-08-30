@@ -99,6 +99,10 @@ run "приоритет явных флагов над сохранённым п
 run "перезапуск после --apply и код возврата" \
     bash tests/test_obf_restart.sh bin/awg-obfuscation.sh
 
+head_ "Согласованность состояния"
+run "ключи и пиры: клиент без пира, сирота, дубликат адреса, чужой ключ сервера" \
+    bash tests/test_consistency.sh
+
 head_ "Адрес сервера"
 run "сверка хоста у клиентов и молчание там, где ответ недоказуем" \
     bash tests/test_endpoint.sh

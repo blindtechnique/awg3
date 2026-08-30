@@ -47,9 +47,9 @@ mk() {  # mk <каталог> <хост1> [хост2 …] — по конфиг�
 }
 
 hosts() {  # hosts <объявленный> <каталог> → вывод проверки
-    ( ok()   { printf 'OK %s\n' "$1"; }
-      bad()  { printf 'BAD %s\n' "$1"; }
-      warn() { printf 'WARN %s\n' "$1"; }
+    ( ok()   { printf 'OK %s\n' "$*"; }
+      bad()  { printf 'BAD %s\n' "$*"; }
+      warn() { printf 'WARN %s\n' "$*"; }
       eval "$HOSTFN"
       check_client_hosts "$1" "$2" awg2 )
 }
@@ -143,9 +143,9 @@ mkstub() {  # mkstub <src для ip route get> <A-записи через про
 }
 ep() {  # ep <ENDPOINT> → вывод проверки
     ( PATH="$S:$PATH"
-      ok()   { printf 'OK %s\n' "$1"; }
-      bad()  { printf 'BAD %s\n' "$1"; }
-      warn() { printf 'WARN %s\n' "$1"; }
+      ok()   { printf 'OK %s\n' "$*"; }
+      bad()  { printf 'BAD %s\n' "$*"; }
+      warn() { printf 'WARN %s\n' "$*"; }
       # shellcheck disable=SC2034  # читает вырезанная из доктора функция
       ENDPOINT="$1"
       eval "$EPFN"
@@ -206,6 +206,51 @@ case "$out" in
     *WARN*|*BAD*) bad "голый IP оспорен" "$out" ;;
     *) ok "объявленное значение принято как есть" ;;
 esac
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "12. Ответ владельца старше журнала: --reconfigure --host"
+# `--reconfigure --host НОВЫЙ` молча не работал: resolve_endpoint ставила новый
+# адрес, а следующая строка возвращала старый из install-state.env (на
+# установленном сервере он непуст всегда). write_services писала старый, и
+# «Готово. Адрес сервера:» печатало затёртое значение. Сухой прогон при этом
+# смену ОБЕЩАЛ — план и прогон расходились.
+EPF="$(sed -n '/^endpoint_final()/,/^}$/p' install.sh)"
+if [ -z "$EPF" ]; then
+    bad "не нашли endpoint_final в install.sh" "мерить нечего"
+else
+    epf() {  # epf <CLI_HOST> <RECONFIGURE> <AWG_ENDPOINT> <ENDPOINT>
+        # shellcheck disable=SC2034  # читает вырезанная из install.sh функция
+        ( CLI_HOST="$1" RECONFIGURE="$2" AWG_ENDPOINT="$3" ENDPOINT="$4"
+          eval "$EPF"; endpoint_final )
+    }
+    got="$(epf new.example.org 1 old.example.org из-опроса)"
+    [ "$got" = new.example.org ] \
+        && ok "--reconfigure --host побеждает журнал ($got)" \
+        || bad "--host отброшен, взят [$got]" "именно эта команда напечатана как лекарство при восстановлении"
+    got="$(epf new.example.org 0 old.example.org из-опроса)"
+    [ "$got" = old.example.org ] \
+        && ok "без --reconfigure адрес не меняется — как и обещает план" \
+        || bad "--host применён без --reconfigure ($got)" "план в этом случае пишет его в «проигнорировано»"
+    got="$(epf "" 0 old.example.org из-опроса)"
+    [ "$got" = old.example.org ] && ok "без --host берётся сохранённый" \
+        || bad "сохранённый адрес потерян ($got)"
+    got="$(epf "" 0 "" из-опроса)"
+    [ "$got" = из-опроса ] && ok "на первой установке — ответ из опроса" \
+        || bad "ответ опроса потерян ($got)"
+fi
+
+# План и прогон обязаны решать по одному условию, иначе сухой прогон снова
+# начнёт обещать не то. Сверяем, что оба смотрят на CLI_HOST и RECONFIGURE.
+plan_cond="$(grep -c 'CLI_HOST" \] && \[ "\$RECONFIGURE" = 1' install.sh || true)"
+run_cond="$(sed -n '/^endpoint_final()/,/^}$/p' install.sh \
+            | grep -c 'CLI_HOST:-}" \] && \[ "\${RECONFIGURE:-0}" = 1' || true)"
+if [ "$plan_cond" -ge 1 ] && [ "$run_cond" -ge 1 ]; then
+    ok "план и прогон решают по одному условию (--host + --reconfigure)"
+else
+    bad "условия плана и прогона разошлись (план=$plan_cond, прогон=$run_cond)" \
+        "сухой прогон снова начнёт обещать то, чего не будет"
+fi
 
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"

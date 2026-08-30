@@ -101,8 +101,14 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 head_ "2. Пустой AWG_ENDPOINT не роняет прогон"
 
-EP="$(sed -n '/^    ENDPOINT="${AWG_ENDPOINT:-/,+2p' install.sh)"
-if [ -z "$EP" ]; then
+# Разбор адреса живёт в endpoint_final (вынесен туда, чтобы `--reconfigure
+# --host` перестал молча не работать), а в main() остались три строки вокруг
+# вызова. Берём и то и другое: без функции кусок не самодостаточен.
+EPFN="$(sed -n '/^endpoint_final()/,/^}$/p' install.sh)"
+EP="$(sed -n '/^    ENDPOINT="\$(endpoint_final)"/,+2p' install.sh)"
+EP="$EPFN
+$EP"
+if [ -z "$EPFN" ] || [ -z "$(sed -n '/^    ENDPOINT="\$(endpoint_final)"/p' install.sh)" ]; then
     bad "не нашли разбор ENDPOINT в main()" "мерить нечего"
 else
     # Так выглядит сервер, поставленный без tty и без внешнего адреса:

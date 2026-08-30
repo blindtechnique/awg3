@@ -32,8 +32,30 @@ PROBLEMS=0
 declare -a REPORT=()
 
 ok()   { REPORT+=("OK|$1");   [ "$JSON" = 1 ] || printf '  \033[1;32m✓\033[0m %s\n' "$1"; }
-bad()  { REPORT+=("FAIL|$1"); PROBLEMS=$((PROBLEMS+1)); [ "$JSON" = 1 ] || printf '  \033[1;31m✗\033[0m %s\n' "$1"; }
-warn() { REPORT+=("WARN|$1"); [ "$JSON" = 1 ] || printf '  \033[1;33m!\033[0m %s\n' "$1"; }
+# Второй аргумент — объяснение: что именно это значит и что делать. Раньше он
+# принимался и молча выбрасывался, хотя пять вызовов в этом файле его передают.
+# В REPORT клеится к той же строке через тире: бот разбирает отчёт по трём
+# известным префиксам, и новый статус сломал бы ему разметку.
+bad()  {
+    local m="$1"
+    [ $# -gt 1 ] && m="$1 — $2"
+    REPORT+=("FAIL|$m"); PROBLEMS=$((PROBLEMS+1))
+    if [ "$JSON" != 1 ]; then
+        printf '  \033[1;31m✗\033[0m %s\n' "$1"
+        [ $# -gt 1 ] && printf '      %s\n' "$2"
+    fi
+    return 0
+}
+warn() {
+    local m="$1"
+    [ $# -gt 1 ] && m="$1 — $2"
+    REPORT+=("WARN|$m")
+    if [ "$JSON" != 1 ]; then
+        printf '  \033[1;33m!\033[0m %s\n' "$1"
+        [ $# -gt 1 ] && printf '      %s\n' "$2"
+    fi
+    return 0
+}
 # заголовок секции идёт и в JSON: бот рисует по нему структуру, иначе в чат
 # приезжает плоская простыня без разделов
 head_() { REPORT+=("SECTION|$1"); [ "$JSON" = 1 ] || printf '\n\033[1m%s\033[0m\n' "$1"; }
@@ -248,6 +270,83 @@ check_client_hosts() {  # check_client_hosts <объявленный хост> <
     fi
 }
 
+
+# ── ключи и пиры ────────────────────────────────────────────────────────────
+# Приватный ключ клиента есть ТОЛЬКО в его конфиге, публичный — в [Peer]
+# серверного. Пара пишется не атомарно (три отдельные записи в add_client, две
+# в del_client), поэтому расхождение достижимо обрывом, а не только переносом.
+# Сверка идёт по КЛЮЧУ, а не по адресу: next_ip переиспользует освободившиеся
+# адреса, и сверка по AllowedIPs дала бы ложное зелёное.
+check_peers() {  # check_peers <серверный конфиг> <каталог клиентов> <метка>
+    local conf="$1" cldir="$2" label="$3"
+    [ -f "$conf" ] || return 0
+    [ -d "$cldir" ] || return 0
+    command -v awg >/dev/null 2>&1 || { warn "$label: нет awg — пары ключей не сверялись"; return 0; }
+
+    local srv_priv srv_pub peers f cpriv cpub addr
+    srv_priv="$(sed -n 's/^PrivateKey *= *//p' "$conf" 2>/dev/null | head -1 || true)"
+    srv_pub=""
+    [ -n "$srv_priv" ] && srv_pub="$(printf '%s' "$srv_priv" | awg pubkey 2>/dev/null || true)"
+    peers="$(sed -n 's/^PublicKey *= *//p' "$conf" 2>/dev/null | tr '\n' ' ' || true)"
+
+    local n=0 lost=0 lost_s="" wrongsrv=0 wrongsrv_s="" seen="" dup=0 dup_s="" matched=""
+    for f in "$cldir"/*-am.conf; do
+        [ -f "$f" ] || continue
+        cpriv="$(sed -n 's/^PrivateKey *= *//p' "$f" 2>/dev/null | head -1 || true)"
+        [ -n "$cpriv" ] || continue          # чужой файл — не наш формат
+        cpub="$(printf '%s' "$cpriv" | awg pubkey 2>/dev/null || true)"
+        [ -n "$cpub" ] || continue           # ключ не выводится — молчим, доказать нечем
+        n=$((n + 1))
+        case " $peers " in
+            *" $cpub "*) matched="$matched $cpub" ;;
+            *) lost=$((lost + 1)); [ -n "$lost_s" ] || lost_s="$(basename "$f")" ;;
+        esac
+        # Ключ сервера в [Peer] клиента: несовпадение делает handshake
+        # невозможным, и законного состояния у него нет.
+        if [ -n "$srv_pub" ]; then
+            local cs
+            cs="$(sed -n 's/^PublicKey *= *//p' "$f" 2>/dev/null | head -1 || true)"
+            if [ -n "$cs" ] && [ "$cs" != "$srv_pub" ]; then
+                wrongsrv=$((wrongsrv + 1))
+                [ -n "$wrongsrv_s" ] || wrongsrv_s="$(basename "$f")"
+            fi
+        fi
+        addr="$(sed -n 's/^Address *= *//p' "$f" 2>/dev/null | head -1 || true)"
+        addr="${addr%%,*}"
+        if [ -n "$addr" ]; then
+            case " $seen " in
+                *" $addr "*) dup=$((dup + 1)); [ -n "$dup_s" ] || dup_s="$addr" ;;
+                *) seen="$seen $addr" ;;
+            esac
+        fi
+    done
+    [ "$n" = 0 ] && return 0
+
+    if [ "$lost" = 0 ]; then
+        ok "$label: все $n клиентов есть среди пиров сервера"
+    else
+        bad "$label: у $lost из $n клиентов ключа нет среди пиров ($lost_s)" \
+            "эти конфиги выданы, но сервер их не примет — заведи клиентов заново"
+    fi
+    if [ "$wrongsrv" != 0 ]; then
+        bad "$label: у $wrongsrv из $n конфигов чужой ключ сервера ($wrongsrv_s)" \
+            "handshake невозможен: ключ сервера сменился, а конфиги несут прежний"
+    fi
+    if [ "$dup" != 0 ]; then
+        bad "$label: $dup конфигов делят адрес с другим клиентом ($dup_s)" \
+            "следующий выданный клиент заберёт маршрут у работающего"
+    fi
+    # Пир без клиентского файла — доступ, который нельзя отозвать по имени.
+    # warn, а не bad: пир мог быть заведён руками, а файл унесён владельцем.
+    local p orphan=0
+    for p in $peers; do
+        case " $matched " in *" $p "*) ;; *) orphan=$((orphan + 1)) ;; esac
+    done
+    if [ "$orphan" != 0 ]; then
+        warn "$label: $orphan пиров без клиентского файла — доступ есть, отозвать по имени нечем"
+    fi
+}
+
 check_iface() {  # check_iface <имя> <порт> <подсеть> <слой>
     local i="$1" p="$2" sub="$3" layer="$4" unit peers
     [ "$layer" = 3 ] && unit="$(unit3)" || unit="awg-quick@$i"
@@ -282,6 +381,7 @@ if [ "$LAYER2" = 1 ]; then
     check_iface "${IFACE2:-awg2}" "${PORT2:-0}" "${SUBNET2:-10.29.79}" 2
     check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2"
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
+    check_peers "$AWG_DIR/${IFACE2:-awg2}.conf" "$DEST/clients/awg2" "${IFACE2:-awg2}"
 fi
 
 if [ "$LAYER3" = 1 ]; then
@@ -301,6 +401,7 @@ if [ "$LAYER3" = 1 ]; then
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
     check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3"
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
+    check_peers "$AWG_DIR/${IFACE3:-awg3}.conf" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     if [ "$KMOD3" = 1 ]; then
         # Известная поломка ветки feat/awg3: политика netlink в модуле объявляет
         # WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL как NLA_U64, а утилиты шлют u32,
