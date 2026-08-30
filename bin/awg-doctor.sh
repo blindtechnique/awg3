@@ -172,10 +172,56 @@ check_endpoint
 # могут молча: правка конфига руками, оборванная миграция, перенос сервера. И
 # тогда «порт не слушается» — это следствие, а не причина, а лечится оно
 # переизданием клиентских конфигов, а не перезапуском сервиса.
-check_ports() {  # check_ports <имя_интерфейса> <объявленный порт> <каталог клиентов>
-    local iface="$1" want="$2" cldir="$3"
+# Порт годен, если это число из 1..65535. Вынесено, потому что сравнивать
+# приходится в трёх местах, и `[ "$p" -gt 0 ]` на нечисле ещё и ругается.
+valid_port() {
+    case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# Порт в Endpoint у выданных конфигов. Проверяется САМ ПО СЕБЕ, без сверки с
+# объявленным: значение вне 1..65535 недействительно всегда и доказывается
+# одним файлом. Раньше этот осмотр выключался ранним выходом из check_ports —
+# то есть ровно там, где поломка гарантирована.
+check_client_ports() {  # check_client_ports <каталог клиентов> <метка>
+    local cldir="$1" label="$2" f ep p n=0 bad_n=0 sample=""
+    [ -d "$cldir" ] || return 0
+    for f in "$cldir"/*-am.conf; do
+        [ -f "$f" ] || continue
+        ep="$(sed -n 's/^Endpoint *= *//p' "$f" 2>/dev/null | head -1 || true)"
+        [ -n "$ep" ] || continue
+        p="${ep##*:}"
+        n=$((n + 1))
+        valid_port "$p" && continue
+        bad_n=$((bad_n + 1))
+        [ -n "$sample" ] || sample="$(basename "$f") → $ep"
+    done
+    [ "$bad_n" = 0 ] && return 0
+    bad "$label: у $bad_n из $n конфигов недействительный порт ($sample)" \
+        "такой конфиг не подключится никогда — переиздай клиентов после того, как порт будет объявлен"
+}
+
+check_ports() {  # check_ports <имя> <объявленный порт> <каталог клиентов> <имя переменной>
+    local iface="$1" want="$2" cldir="$3" var="${4:-}"
     local conf="$AWG_DIR/${iface}.conf" got n=0 bad_n=0 sample=""
-    [ -n "$want" ] && [ "$want" != 0 ] || { warn "порт $iface не объявлен в services.env"; return; }
+    # ДО раннего выхода: недействительный порт у клиента доказывается одним
+    # файлом, и объявленное значение для этого не нужно.
+    check_client_ports "$cldir" "$iface"
+    if ! valid_port "$want"; then
+        # «Переменной нет вовсе» и «переменная есть, но пуста или ноль» — разные
+        # диагнозы. Первое бывает на установке прежних версий, доказать по нему
+        # нечего. Второе — сломанный план: слой объявлен включённым, а порта у
+        # него нет, и клиенты выписываются с нулевым или чужим портом.
+        # [ -f ] перед grep обязателен: с пустым путём grep читает stdin и
+        # прогон повисает молча — в стенде SERVICES может быть не задан.
+        if [ -n "$var" ] && [ -f "${SERVICES:-}" ] && grep -q "^${var}=" "$SERVICES"; then
+            bad "$iface: в services.env $var пуст или недействителен ($want)" \
+                "клиенты выписываются с негодным портом — задай порт и переиздай их"
+        else
+            warn "порт $iface не объявлен в services.env"
+        fi
+        return
+    fi
 
     got="$(sed -n 's/^ListenPort *= *//p' "$conf" 2>/dev/null | head -1 || true)"
     if [ -z "$got" ]; then
@@ -377,8 +423,13 @@ check_iface() {  # check_iface <имя> <порт> <подсеть> <слой>
     # Локальный адрес — предпоследнее поле в любой. Так же считает busy_ports.
     # grep -q оставлен сознательно: вывод ss короткий, в буфер трубы влезает,
     # и SIGPIPE тут не случается — а файл к тому же идёт без set -e.
-    if ss -lunH 2>/dev/null | awk '{print $(NF-1)}' | grep -qE ":$p\$"; then ok "порт $p слушается"
-    else bad "порт $p не слушается"; fi
+    # Про недействительный порт уже сказала check_ports, и сказала точнее:
+    # «порт 0 не слушается» уводит перезапускать сервис, тогда как чинить надо
+    # объявление порта и переиздание конфигов.
+    if valid_port "$p"; then
+        if ss -lunH 2>/dev/null | awk '{print $(NF-1)}' | grep -qE ":$p\$"; then ok "порт $p слушается"
+        else bad "порт $p не слушается"; fi
+    fi
     if iptables -w -t nat -C POSTROUTING -s "${sub}.0/24" -o "${WAN:-eth0}" -j MASQUERADE 2>/dev/null; then
         ok "NAT для ${sub}.0/24 настроен"
     else
@@ -393,7 +444,7 @@ if [ "$LAYER2" = 1 ]; then
     if modinfo amneziawg >/dev/null 2>&1; then ok "модуль amneziawg собран"
     else bad "модуль amneziawg недоступен — dkms status"; fi
     check_iface "${IFACE2:-awg2}" "${PORT2:-0}" "${SUBNET2:-10.29.79}" 2
-    check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2"
+    check_ports "${IFACE2:-awg2}" "${PORT2:-}" "$DEST/clients/awg2" PORT2
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg2" "${IFACE2:-awg2}"
     check_peers "$AWG_DIR/${IFACE2:-awg2}.conf" "$DEST/clients/awg2" "${IFACE2:-awg2}"
 fi
@@ -413,7 +464,7 @@ if [ "$LAYER3" = 1 ]; then
         else bad "нет amneziawg-go"; fi
     fi
     check_iface "${IFACE3:-awg3}" "${PORT3:-0}" "${SUBNET3:-10.29.80}" 3
-    check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3"
+    check_ports "${IFACE3:-awg3}" "${PORT3:-}" "$DEST/clients/awg3" PORT3
     check_client_hosts "${ENDPOINT:-}" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     check_peers "$AWG_DIR/${IFACE3:-awg3}.conf" "$DEST/clients/awg3" "${IFACE3:-awg3}"
     if [ "$KMOD3" = 1 ]; then
