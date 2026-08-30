@@ -119,6 +119,10 @@ KMOD_STAMP="$SRC/.amneziawg-kmod.ref"
 KMOD3=0
 
 NO_BOT=0; RECONFIGURE=0; UPDATE=0; UNINSTALL=0; PLAN=0
+# Взводится, если конфиги клиентов пересоздать не удалось. Прогон при этом
+# доводится до конца — сервер уже настроен, — но код возврата обязан быть
+# ненулевым: «не подключится никто» с нулём автоматика читает как успех.
+_regen_failed=0
 INSTALL_BOT=0; REMOVE_BOT=0; ASSUME_YES=0
 CLI_VER=""; CLI_PRESET=""; CLI_TEMPLATE=""; CLI_FP=""; CLI_MTU=""; CLI_HOST=""
 # Слой 3.0 настраивается отдельно. Пусто = «взять как у 2.0» — так вели себя
@@ -1590,7 +1594,18 @@ main() {
     gen_obfuscation || { _orc=$?; [ "$_orc" = 3 ] || exit "$_orc"; }
     setup_stats
     enable_units
-    "$DEST/awg-client.sh" regen-all 2>/dev/null || true
+    # Отказ здесь НЕ должен ронять прогон: сервер уже переехал на новый профиль,
+    # и аварийный выход сделал бы только хуже. Но и молчать нельзя — это самый
+    # разрушительный из возможных отказов: сервер на новом профиле, клиенты на
+    # старом, то есть не подключается никто. Раньше вывод уходил в /dev/null, а
+    # `|| true` съедал код, и прогон допечатывал «Готово».
+    if ! "$DEST/awg-client.sh" regen-all; then
+        _regen_failed=1
+        err "конфиги клиентов НЕ пересозданы, а сервер уже на новом профиле."
+        err "Это значит, что сейчас не подключится никто. Запусти вручную:"
+        err "    awg-client regen-all"
+        err "и раздай клиентам обновлённые конфиги."
+    fi
 
     if [ "${AWG_BOT_INSTALL:-0}" = 1 ] && [ -n "${AWG_BOT_TOKEN:-}" ]; then
         _deploy_bot "$AWG_BOT_TOKEN" "$AWG_BOT_ADMINS"
@@ -1605,6 +1620,9 @@ main() {
     [ "$LAYER2" = 1 ] && log "  awg-client add myphone awg2   # клиент 2.0"
     [ "$LAYER3" = 1 ] && log "  awg-client add laptop  awg3   # клиент 3.0"
     log "  awg-doctor                    # проверка связности"
+    # Ненулевой код в самом конце: всё сказано, подсказки напечатаны, но для
+    # автоматики этот прогон обязан считаться неуспешным.
+    [ "$_regen_failed" = 0 ] || return 1
     return 0
 }
 main
