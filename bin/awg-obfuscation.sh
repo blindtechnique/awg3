@@ -189,8 +189,11 @@ else
 fi
 # серверный блок — строго из сохранённого env (порядок ключей фиксирован)
 # Ключи, которые пишутся прямо в [Interface]. Параметры 3.0 попадают сюда
-# только в режиме ядра: там их понимает `awg setconf` из ветки feat/awg3.
-# В обычном режиме они уезжают отдельным файлом .v3 через UAPI.
+# только в режиме ядра. Раньше здесь стояло «их понимает awg setconf из ветки
+# feat/awg3» — ветки давно нет, а с пина v3.0.20260805 их разбирают обычные
+# утилиты (config.c: HeaderProtectionKey, ContentPaddingAddition).
+# В обычном режиме они всё равно уезжают отдельным файлом .v3 через UAPI:
+# этот путь рабочий, а замена его на .conf требует проверки на живом сервере.
 CONF_KEYS="Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5"
 if [ "$V3" = 1 ] && [ "${KMOD3:-0}" = 1 ]; then
     CONF_KEYS="$CONF_KEYS HeaderProtectionKey ContentPaddingAddition RekeyAfterTime"
