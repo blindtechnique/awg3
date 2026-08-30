@@ -1,0 +1,23 @@
+# Места, где конструкция из аудита есть, но не стреляет. Каждая строка —
+# разбор, а не отписка: почему именно здесь код возврата никуда не попадает.
+#
+# Формат:  файл :: правило :: код :: обоснование
+#
+# Если код изменится, строка перестанет к чему-либо относиться, и аудит
+# сообщит об этом отдельно — чтобы список не гнил.
+bin/awg-datapath.sh :: colon-plus-flag :: log "$IFACE настроен (MTU ${MTU:-1380}${SUBNET:+, подсеть $SUBNET}${NAT:+, NAT=$NAT})" :: строка лога: NAT это 0 или 1, и «NAT=0» в сообщении читается верно; на поведение не влияет
+bin/awg-datapath.sh :: pipe-fallible :: awg-quick strip "$IFACE" | grep -vE '^__AWG3?_OBFUSCATION__$' > "$stripped" :: отказ awg-quick strip означает отсутствующий конфиг интерфейса — продолжать в этом случае нечего, смерть здесь и есть верный исход
+bin/awg-doctor.sh :: pipe-fallible :: conf="$(ls -1 "$DEST/clients/$svc"/*"$tmp"*-am.conf 2>/dev/null | head -1)" :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
+bin/awg-doctor.sh :: pipe-fallible :: hs="$(ip netns exec "$ns" awg show "$dev" latest-handshakes 2>/dev/null | awk '{print $2}')" :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
+bin/awg-doctor.sh :: pipe-fallible :: n="$(ls -1 "$DEST/clients/$svc"/*-am.conf 2>/dev/null | wc -l)" :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
+bin/awg-doctor.sh :: pipe-fallible :: | grep -vE '^(HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts) *=') >/dev/null 2>&1 :: файл идёт без set -e: отказ конвейера оставляет пустое значение, и диагностика продолжается — это её штатное поведение
+bin/awg-doctor.sh :: pipe-predicate :: if ss -lunH 2>/dev/null | awk '{print $(NF-1)}' | grep -qE ":$p\$"; then ok "порт $p слушается" :: producer это ss по одному протоколу: десятки строк, в буфер трубы влезает целиком, SIGPIPE не наступает
+bin/awg-menu.sh :: pipe-fallible :: n="$(ls -1 "$DEST/clients/$svc"/*-am.conf 2>/dev/null | wc -l)" :: файл идёт без set -e: отказ конвейера не прерывает меню, пустое значение показывается как ноль
+bin/awg-menu.sh :: pipe-fallible :: systemctl status awg-bot --no-pager -l 2>/dev/null | head -6 :: файл идёт без set -e: отказ конвейера не прерывает меню, пустое значение показывается как ноль
+bin/awg-obfuscation.sh :: pipe-fallible :: -h|--help) grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;; :: grep по собственному файлу: шебанг и шапка есть всегда, совпадение гарантировано
+bin/awg-upstream-check.sh :: pipe-fallible :: new="$(git ls-remote "https://github.com/blindtechnique/awg3.git" "refs/heads/$branch" 2>/dev/null | cut -c1-12)" :: файл идёт без set -e: проверка обновлений при отказе сети просто ничего не показывает
+bin/awg-upstream-check.sh :: pipe-fallible :: | awk -F/ '{print $NF}' | grep -E '^v[0-9]' | sort -V | tail -1 :: файл идёт без set -e: проверка обновлений при отказе сети просто ничего не показывает
+bin/awg-upstream-check.sh :: pipe-predicate :: if printf '%s' "$hdr" | grep -q WGDEVICE_A_HEADER_PROTECTION_KEY; then :: producer это printf одной переменной с заголовочным файлом апстрима (десятки КБ) — меньше 64 КБ буфера трубы, SIGPIPE не наступает
+bin/awg-upstream-check.sh :: pipe-predicate :: if printf '%s' "$hdr" | grep -q WGDEVICE_A_RANDOM_TRAILERS; then :: producer это printf одной переменной с заголовочным файлом апстрима (десятки КБ) — меньше 64 КБ буфера трубы, SIGPIPE не наступает
+install.sh :: pipe-fallible :: "$REPO_DIR/bot/bot.env.template" | grep -v '^#' :: grep -v по нашему же шаблону: в нём есть строки без решётки, иначе бот всё равно не поднялся бы
+install.sh :: pipe-fallible :: -h|--help) grep '^#' "$0" | sed 's/^# \?//'; exit 0 ;; :: grep по собственному файлу: шебанг и шапка есть всегда, совпадение гарантировано

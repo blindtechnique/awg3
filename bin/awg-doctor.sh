@@ -64,7 +64,8 @@ if [ -n "${ENDPOINT:-}" ]; then
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)"
     case "$ENDPOINT" in
         *[a-zA-Z]*)
-            got="$(getent ahostsv4 "$ENDPOINT" 2>/dev/null | awk '{print $1; exit}')"
+            # getent отдаёт 2 на нерезолвящемся имени — штатный ответ.
+            got="$(getent ahostsv4 "$ENDPOINT" 2>/dev/null | awk '{print $1; exit}' || true)"
             if [ -z "$got" ]; then bad "домен $ENDPOINT не резолвится — клиенты не найдут сервер"
             elif [ -n "$ip" ] && [ "$got" != "$ip" ]; then
                 warn "домен $ENDPOINT указывает на $got, а адрес сервера $ip"
@@ -85,8 +86,12 @@ check_iface() {  # check_iface <имя> <порт> <подсеть> <слой>
     fi
     if systemctl is-active --quiet "$unit"; then ok "$unit активен"
     else bad "$unit не активен"; fi
-    # ВНИМАНИЕ: у `ss -lunH` локальный адрес — четвёртая колонка; пятая это peer
-    if ss -lunH 2>/dev/null | awk '{print $4}' | grep -qE ":$p\$"; then ok "порт $p слушается"
+    # Поле берём с конца, а не по номеру: `ss -lunH` печатает колонку Netid не
+    # на всех версиях iproute2, и «четвёртая» верна лишь в одной раскладке.
+    # Локальный адрес — предпоследнее поле в любой. Так же считает busy_ports.
+    # grep -q оставлен сознательно: вывод ss короткий, в буфер трубы влезает,
+    # и SIGPIPE тут не случается — а файл к тому же идёт без set -e.
+    if ss -lunH 2>/dev/null | awk '{print $(NF-1)}' | grep -qE ":$p\$"; then ok "порт $p слушается"
     else bad "порт $p не слушается"; fi
     if iptables -w -t nat -C POSTROUTING -s "${sub}.0/24" -o "${WAN:-eth0}" -j MASQUERADE 2>/dev/null; then
         ok "NAT для ${sub}.0/24 настроен"

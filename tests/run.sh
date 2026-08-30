@@ -69,6 +69,9 @@ run "окно junk-пакетов и неизменность на рабоче�
 head_ "Пины апстрима"
 run "утилиты, модуль и датапас одной серии" bash tests/test_pins.sh
 
+head_ "Аудит shell-паттернов"
+run "новых мест того же класса не появилось" "$PY" tests/audit_shell_patterns.py
+
 head_ "Ловушки bash"
 run "занятый порт, пустой адрес и конфиг без ключа не рушат прогон"     bash tests/test_bash_traps.sh
 

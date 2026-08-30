@@ -87,14 +87,27 @@ load_obfuscation() {
 
 server_pubkey() {
     # cut -d= -f2- сохраняет хвостовой '=' base64-ключа (awk -F' *= *' его срезал бы)
-    grep '^PrivateKey' "$SERVER_CONF" | head -1 | cut -d= -f2- | tr -d ' \t' | awg pubkey
+    # Читаем отдельно, а не одной трубой в awg pubkey: под pipefail grep без
+    # совпадения отдаёт 1, и вся команда умирала молча — без единой строки о
+    # том, что в серверном конфиге нет ключа. Пустой ключ здесь означает
+    # ненастроенный сервер, и сказать это надо вслух.
+    local priv
+    priv="$(grep '^PrivateKey' "$SERVER_CONF" | head -1 | cut -d= -f2- | tr -d ' \t' || true)"
+    [ -n "$priv" ] || die "в $SERVER_CONF нет PrivateKey — сервер не настроен"
+    printf '%s' "$priv" | awg pubkey
 }
 
 next_ip() {
     local used i
     used="$(grep -oE "AllowedIPs = ${SUBNET//./\\.}\.[0-9]+" "$SERVER_CONF" | grep -oE '[0-9]+$' || true)"
     for i in $(seq 2 254); do
-        echo "$used" | grep -qx "$i" || { echo "${SUBNET}.${i}"; return 0; }
+        # Без трубы: `echo | grep -q` под pipefail отдаёт 141 при совпадении в
+        # начале списка, и занятый адрес выдавался бы как свободный — двум
+        # клиентам достался бы один IP. В az-awg2 это уже исправлено.
+        case $'\n'"$used"$'\n' in
+            *$'\n'"$i"$'\n'*) ;;              # занят — берём следующий
+            *) echo "${SUBNET}.${i}"; return 0 ;;
+        esac
     done
     die "свободные адреса в ${SUBNET}.0/24 закончились"
 }
@@ -198,7 +211,10 @@ del_client() {
     local conf="${outdir}/${SVC}-${name}-am.conf"
     [ -f "$conf" ] || die "клиент '$name' ($SVC) не найден"
     local cpriv cpub
-    cpriv="$(grep '^PrivateKey' "$conf" | head -1 | cut -d= -f2- | tr -d ' \t')"
+    # `|| true` обязателен: под pipefail grep без совпадения отдаёт 1, и
+    # удаление умирало без единой строки вывода. В az-awg2 уже исправлено.
+    cpriv="$(grep '^PrivateKey' "$conf" | head -1 | cut -d= -f2- | tr -d ' \t' || true)"
+    [ -n "$cpriv" ] || die "в конфиге '$conf' нет PrivateKey — по ключу удалять нечего"
     cpub="$(printf '%s' "$cpriv" | awg pubkey)"
     awg set "$IFACE" peer "$cpub" remove 2>/dev/null || true
     python3 - "$SERVER_CONF" "$cpub" <<'PY'

@@ -610,7 +610,12 @@ detect_public_ip() {
 check_host_dns() {  # check_host_dns <домен> <наш IP>
     local host="$1" our="$2" got
     case "$host" in *[a-zA-Z]*) ;; *) return 0 ;; esac   # это IP — проверять нечего
-    got="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
+    # getent отдаёт 2, когда имя не резолвится, — это штатный ответ, а не
+    # авария. Без `|| true` присваивание умирало бы раньше строки ниже, и
+    # сообщение «домен не резолвится» не печаталось бы никогда. Сейчас всех
+    # вызывающих спасает то, что они зовут функцию в условии или через ||,
+    # где errexit снят, — но это свойство вызывающего, а не этого кода.
+    got="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
     [ -n "$got" ] || { err "домен $host не резолвится"; return 1; }
     [ "$got" = "$our" ] && return 0
     err "домен $host указывает на $got, а внешний адрес сервера — $our"
