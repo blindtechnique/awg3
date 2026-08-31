@@ -252,6 +252,69 @@ else
         "сухой прогон снова начнёт обещать то, чего не будет"
 fi
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "13. Порядок в main(): plan_services не отменяет ответ владельца"
+# Раздел 12 проверяет саму endpoint_final — и был зелёным, пока
+# `--reconfigure --host` молча не работал: plan_services сорсит services.env в
+# ОБЩУЮ область видимости (local ENDPOINT в файле нет ни разу) и возвращает
+# переменную к прошлому значению. Функция верна, порядок — нет. Поэтому здесь
+# воспроизводится та же последовательность, что в main():
+#   ENDPOINT=$(endpoint_final) → plan_services → блок «намерение сильнее»
+PS="$(sed -n '/^plan_services()/,/^}$/p' install.sh)"
+INTENT="$(sed -n '/^    case "\$AWG_VER" in$/,/^    ENDPOINT="\$(endpoint_final)"$/p' install.sh)"
+# Без конечной строки sed дотягивает срез до конца файла — тогда eval
+# получил бы весь установщик. Требуем и признак, и разумный размер.
+n_intent="$(printf '%s\n' "$INTENT" | wc -l)"
+# Без конечной строки sed дотягивает срез до конца файла, и eval получил бы
+# весь установщик. Требуем и признак, и разумный размер — иначе откат
+# краснел бы, но по неверной причине.
+intent_ok=1
+[ -n "$PS" ] || intent_ok=0
+[ -n "$INTENT" ] || intent_ok=0
+[ "$n_intent" -le 30 ] || intent_ok=0
+printf '%s' "$INTENT" | grep -q endpoint_final || intent_ok=0
+if [ "$intent_ok" = 0 ]; then
+    bad "блок намерения вырезан не целиком ($n_intent строк)" "в нём должен быть вызов endpoint_final — без него порядок не проверить"
+else
+    order() {  # order <CLI_HOST> <RECONFIGURE> <ENDPOINT в services.env>
+        local d; d="$(mktemp -d)"
+        {
+            echo "LAYER2=1"; echo "LAYER3=0"; echo "KMOD3=0"
+            echo "IFACE2=awg2"; echo "IFACE3=awg3"
+            echo "PORT2=51820"; echo "PORT3=51821"
+            echo "SUBNET2=10.29.79"; echo "SUBNET3=10.29.80"
+            echo "MTU2=1420"; echo "MTU3=1380"; echo "WAN=eth0"
+            echo "ENDPOINT='$3'"
+        } > "$d/services.env"
+        ( set -uo pipefail
+          # export, а не голое присваивание: всё это читают вырезанные из
+          # install.sh куски, и статически такую связь не увидеть.
+          export SERVICES="$d/services.env" CLI_HOST="$1" RECONFIGURE="$2"
+          export AWG_ENDPOINT="$1" AWG_VER=2 CLI_PORTS="" CLI_VER="" CLI_DNS=""
+          log() { :; }; err() { :; }; warn() { :; }
+          installed() { [ -f "$SERVICES" ]; }
+          busy_ports() { :; }; pick_random_port() { echo 40000; }
+          eval "$EPF"; eval "$PS"
+          ENDPOINT="$(endpoint_final)"
+          plan_services >/dev/null 2>&1
+          eval "$INTENT"
+          printf '%s' "$ENDPOINT" )
+        rm -rf "$d"
+    }
+
+    got="$(order new.example.org 1 old.example.org)"
+    [ "$got" = new.example.org ] \
+        && ok "адрес владельца дожил до записи ($got)" \
+        || bad "plan_services отменил ответ владельца: [$got]" \
+               "именно так --reconfigure --host молча не работал, пока раздел 12 был зелёным"
+
+    got="$(order "" 0 old.example.org)"
+    [ "$got" = old.example.org ] \
+        && ok "без --host сохранённый адрес на месте" \
+        || bad "сохранённый адрес потерян: [$got]"
+fi
+
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"
 exit $fail

@@ -105,7 +105,9 @@ head_ "2. Пустой AWG_ENDPOINT не роняет прогон"
 # --host` перестал молча не работать), а в main() остались три строки вокруг
 # вызова. Берём и то и другое: без функции кусок не самодостаточен.
 EPFN="$(sed -n '/^endpoint_final()/,/^}$/p' install.sh)"
-EP="$(sed -n '/^    ENDPOINT="\$(endpoint_final)"/,+2p' install.sh)"
+# Первое вхождение и ровно три строки: та же строка есть и в блоке
+# «намерение сильнее сохранённого», а диапазон ,+2p подхватывал оба.
+EP="$(sed -n '/^    ENDPOINT="\$(endpoint_final)"/{N;N;p;q}' install.sh)"
 EP="$EPFN
 $EP"
 if [ -z "$EPFN" ] || [ -z "$(sed -n '/^    ENDPOINT="\$(endpoint_final)"/p' install.sh)" ]; then
