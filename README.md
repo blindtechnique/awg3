@@ -483,6 +483,13 @@ SIGPIPE. Такие места не ловятся чтением кода, по
 - [amnezia-vpn/amneziawg-tools](https://github.com/amnezia-vpn/amneziawg-tools) — утилиты `awg` и `awg-quick`. Пин: `v1.0.20260618-2`.
 - [amnezia-vpn/amnezia-client](https://github.com/amnezia-vpn/amnezia-client) — клиентское приложение, под формат которого собираются ссылки `vpn://`.
 
+## История изменений
+
+Полный список версий — в [CHANGELOG.md](CHANGELOG.md). Порядок выпуска и четыре
+проверки, которые обязан пройти коммит, — в [RELEASE.md](RELEASE.md). Модель
+согласованности, по которой диагностика решает, о чём говорить, а о чём молчать, —
+в [CONSISTENCY.md](CONSISTENCY.md).
+
 ## Лицензия
 
 [GPLv3](LICENSE). Свободно используй, меняй и распространяй — производные тоже остаются открытыми.
