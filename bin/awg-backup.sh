@@ -277,6 +277,22 @@ do_restore() {
         rc=1
     fi
     _restore_part "$stage/state" "$DEST" "сроки и состояние установки"
+    # Тот же адрес лежит в архиве ВТОРОЙ копией — в install-state.env, и она
+    # приезжает сюда строкой выше, уже после починки services.env. Сама по себе
+    # она безобидна: awg-client берёт хост только из services.env. Опасен
+    # следующий прогон install.sh — endpoint_final читает
+    # ${AWG_ENDPOINT:-${ENDPOINT:-}}, то есть state ПЕРВЫМ, и обычное
+    # обновление тихо возвращает адрес мёртвой машины в services.env. Починка
+    # выше отменяется задним числом, через неделю и без единой строки в выводе.
+    if [ -n "$ep_local" ] && [ -f "$DEST/install-state.env" ]; then
+        local ep_state
+        ep_state="$( . "$DEST/install-state.env" 2>/dev/null || true; printf '%s' "${AWG_ENDPOINT:-}" )"
+        if [ -n "$ep_state" ] && [ "$ep_state" != "$ep_local" ]; then
+            sed -i "s|^AWG_ENDPOINT=.*|AWG_ENDPOINT='$ep_local'|" "$DEST/install-state.env" \
+                || { err "в install-state.env остался архивный адрес $ep_state"
+                     err "следующий прогон install.sh вернёт его в services.env"; rc=1; }
+        fi
+    fi
     # Осиротевшие журналы прежней базы. Без этого sqlite при следующем
     # открытии проигрывает старый -wal ПОВЕРХ положенного файла и отдаёт
     # данные прежней установки вместо восстановленных — молча, без ошибки.

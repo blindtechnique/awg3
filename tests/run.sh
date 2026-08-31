@@ -98,6 +98,8 @@ run "приоритет явных флагов над сохранённым п
     bash tests/test_obf_preset.sh bin/awg-obfuscation.sh
 run "перезапуск после --apply и код возврата" \
     bash tests/test_obf_restart.sh bin/awg-obfuscation.sh
+run "regen-all: пропущенный слой слышен и виден по коду" \
+    bash tests/test_regen_skip.sh
 
 head_ "Модель согласованности"
 run "CONSISTENCY.md сверен с кодом в обе стороны" \

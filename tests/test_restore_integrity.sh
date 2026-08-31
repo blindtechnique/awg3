@@ -167,7 +167,7 @@ for i in 1 2 3; do
     printf '[Interface]\nPrivateKey = CLIENT_%s\n' "$i" > "$DEST/clients/awg2/awg2-c$i-am.conf"
 done
 : > "$DEST/stats.db"; printf 'c1\t2030-01-01\n' > "$DEST/expiry.tsv"
-printf "AWG_BOT_TOKEN='x'\n" > "$DEST/install-state.env"
+printf "AWG_BOT_TOKEN='x'\nAWG_ENDPOINT='vpn.example.org'\n" > "$DEST/install-state.env"
 
 S="$W/stub"; mkdir -p "$S"
 for c in ip awg awg-quick; do printf '#!/bin/sh\nexit 0\n' > "$S/$c"; done
@@ -405,6 +405,24 @@ grep -q "адрес сервера оставлен" "$W/ep2.log" \
     && bad "разговор про адрес там, где он не менялся" "$(grep 'адрес' "$W/ep2.log" | head -2)" \
     || ok "ни одной лишней строки"
 [ "$(ep_now)" = "$arch_ep" ] && ok "и адрес на месте" || bad "адрес испорчен: $(ep_now)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "13. Вторая копия адреса — в install-state.env"
+# services.env чинится разделом 11, но тот же адрес лежит в архиве ещё раз, и
+# установщик читает ИМЕННО ЕГО первым (endpoint_final). Пока эта копия архивная,
+# любое следующее обновление возвращает адрес мёртвой машины, отменяя починку.
+st_ep() { sed -n "s/^AWG_ENDPOINT=//p" "$DEST/install-state.env" | tr -d "'\"" | head -1; }
+sed -i "s|^ENDPOINT=.*|ENDPOINT='third.example.org'|" "$AWG/services.env"
+bash "$BK" restore "$W/bk.tar.gz" >"$W/ep3.log" 2>&1
+[ "$(st_ep)" = third.example.org ] \
+    && ok "в state адрес этой машины ($(st_ep))" \
+    || bad "в state архивный адрес: $(st_ep)" "следующий install.sh вернёт его в services.env"
+[ "$(ep_now)" = third.example.org ] \
+    && ok "и services.env с ним согласен" \
+    || bad "копии разошлись: services.env=$(ep_now), state=$(st_ep)"
+grep -q "AWG_BOT_TOKEN" "$DEST/install-state.env" \
+    && ok "остальные ответы владельца в state не тронуты" \
+    || bad "правка адреса снесла соседние ключи" "$(cat "$DEST/install-state.env")"
 
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"
