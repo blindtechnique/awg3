@@ -167,7 +167,7 @@ for i in 1 2 3; do
     printf '[Interface]\nPrivateKey = CLIENT_%s\n' "$i" > "$DEST/clients/awg2/awg2-c$i-am.conf"
 done
 : > "$DEST/stats.db"; printf 'c1\t2030-01-01\n' > "$DEST/expiry.tsv"
-printf "AWG_BOT_TOKEN='x'\nAWG_ENDPOINT='vpn.example.org'\n" > "$DEST/install-state.env"
+printf "AWG_BOT_TOKEN='x'\nAWG_BOT_ADMINS='999'\nAWG_ENDPOINT='vpn.example.org'\n" > "$DEST/install-state.env"
 
 S="$W/stub"; mkdir -p "$S"
 for c in ip awg awg-quick; do printf '#!/bin/sh\nexit 0\n' > "$S/$c"; done
@@ -423,6 +423,79 @@ bash "$BK" restore "$W/bk.tar.gz" >"$W/ep3.log" 2>&1
 grep -q "AWG_BOT_TOKEN" "$DEST/install-state.env" \
     && ok "остальные ответы владельца в state не тронуты" \
     || bad "правка адреса снесла соседние ключи" "$(cat "$DEST/install-state.env")"
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "14. Токен бота не откатывается вместе с архивом"
+# install-state.env приезжает из архива целиком, а живой bot.env в архив не
+# попадает. Само по себе расхождение молчит, но следующий обычный прогон
+# install.sh сорсит state и переписывает им bot.env: отозванный токен убьёт
+# бота, а удалённый ранее chat_id вернёт человеку доступ к кнопке «Бэкап»,
+# которая отдаёт в чат архив со всеми приватными ключами клиентов.
+printf 'AWG_BOT_TOKEN=ЖИВОЙ-ТОКЕН\nAWG_BOT_ADMINS=111\n' > "$DEST/bot.env"
+bash "$BK" restore "$W/bk.tar.gz" >"$W/bot.log" 2>&1
+st_tok="$(sed -n "s/^AWG_BOT_TOKEN=//p" "$DEST/install-state.env" | tr -d "'\"" | head -1)"
+[ "$st_tok" = "ЖИВОЙ-ТОКЕН" ] \
+    && ok "в state остался токен работающего бота" \
+    || bad "в state архивный токен «$st_tok»" \
+           "следующий install.sh перепишет им bot.env и убьёт бота"
+st_adm="$(sed -n "s/^AWG_BOT_ADMINS=//p" "$DEST/install-state.env" | tr -d "'\"" | head -1)"
+[ "$st_adm" = "111" ] \
+    && ok "и список админов тоже" \
+    || bad "в state архивный список админов «$st_adm»" \
+           "удалённый ранее chat_id вернёт себе доступ к меню и к бэкапу"
+grep -q "AWG_BOT_TOKEN" "$W/bot.log" \
+    && ok "и об этом сказано вслух" \
+    || bad "подмена сделана молча" "владелец не узнает, что архив расходился с живым ботом"
+
+# Обратная сторона: если бота на машине нет, спорить не с чем — архивное
+# значение обязано доехать, иначе переезд на новый сервер терял бы токен.
+rm -f "$DEST/bot.env"
+bash "$BK" restore "$W/bk.tar.gz" >"$W/bot2.log" 2>&1
+st_tok="$(sed -n "s/^AWG_BOT_TOKEN=//p" "$DEST/install-state.env" | tr -d "'\"" | head -1)"
+[ "$st_tok" = "x" ] \
+    && ok "без bot.env архивный токен доезжает" \
+    || bad "архивный токен потерян: «$st_tok»" "переезд на новую машину лишится бота"
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "15. Архив без stats.db не убивает живую базу"
+# Архив без базы — штатный путь: при отказе снимка do_backup говорит об этом и
+# намеренно не роняет код. Безусловный `rm -f stats.db-wal` в этом случае сносит
+# журналы ЖИВОЙ базы, а сам stats.db — четырёхкилобайтный заголовок: вся схема
+# живёт в -wal. Дальше sqlite отвечает «no such table» на всё, то есть операция,
+# запущенная ради спасения данных, уничтожает их целиком.
+rm -f "$DEST/stats.db" "$DEST/stats.db-wal" "$DEST/stats.db-shm"
+bash "$BK" backup "$W/nodb.tar.gz" >"$W/nodb.log" 2>&1
+if tar -tzf "$W/nodb.tar.gz" 2>/dev/null | grep -q 'state/stats.db$'; then
+    bad "в архиве есть stats.db" "стенд не воспроизвёл нужный случай"
+else
+    ok "архив снят без базы — как при отказе снимка"
+    python3 - "$DEST/stats.db" <<'PYLIVE'
+import sqlite3, sys, os
+c = sqlite3.connect(sys.argv[1])
+c.execute("PRAGMA journal_mode=WAL")
+c.execute("CREATE TABLE t(k INTEGER PRIMARY KEY, v TEXT)")
+for i in range(300):
+    c.execute("INSERT INTO t(v) VALUES (?)", ("живой%d" % i,))
+c.commit()
+os._exit(0)
+PYLIVE
+    wal="$(stat -c%s "$DEST/stats.db-wal" 2>/dev/null || echo 0)"
+    [ "$wal" != 0 ] && ok "стенд воспроизвёл живую базу: -wal $wal байт" \
+        || bad "не удалось получить непустой -wal" "мерить нечего"
+    bash "$BK" restore "$W/nodb.tar.gz" >"$W/nodbrs.log" 2>&1
+    got="$(python3 - "$DEST/stats.db" <<'PYRD'
+import sqlite3, sys
+try:
+    print(sqlite3.connect(sys.argv[1]).execute("select count(*) from t").fetchone()[0])
+except Exception as e:
+    print("ОШИБКА: %s" % e)
+PYRD
+)"
+    [ "$got" = 300 ] \
+        && ok "живая база пережила восстановление ($got записей)" \
+        || bad "живая база уничтожена: $got" \
+               "восстановление снесло журналы, в которых была вся схема"
+fi
 
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"

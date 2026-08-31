@@ -897,6 +897,15 @@ gen_obfuscation() {
     # Файл проверяем ДЛЯ КАЖДОГО СЛОЯ отдельно: профили у них разные
     # (obfuscation.env и obfuscation3.env), и общая проверка по первому
     # перевыпускала клиентов слоя 3.0 на установке, где стоит только он.
+    # --host обфускатору НЕ передаём, и это не упущение. У этого флага здесь и
+    # там разный смысл: в install.sh --host — адрес сервера, а у обфускатора это
+    # домен-ПРИМАНКА («Кастомный домен для мимикрии (напр. yandex.ru). Enter —
+    # из встроенного пула»). Раньше сюда уезжал реальный ENDPOINT, и шаблон voip
+    # вписывал его в junk-пакет дословно: `OPTIONS sip:vpn.example.org SIP/2.0`.
+    # То есть пакет, который должен маскировать соединение, называл вслух адрес
+    # того самого узла, которому он адресован — до всякого хендшейка и в
+    # открытом виде, чего у WireGuard на проводе нет вовсе. Пул доменов и есть
+    # обещанное умолчание.
     local mode2 mode3
     mode2="$(obf_mode "$AWG_DIR/obfuscation.env")"
     mode3="$(obf_mode "$AWG_DIR/obfuscation3.env")"
@@ -904,13 +913,13 @@ gen_obfuscation() {
         log "Профиль обфускации 2.0: preset=$P template=${T:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE2}.conf" "$DEST/awg-obfuscation.sh" \
             --preset "$P" ${T:+--template "$T"} --fp "$F" --mtu "$MTU2" \
-            ${ENDPOINT:+--host "$ENDPOINT"} "$mode2"
+            "$mode2"
     fi
     if [ "$LAYER3" = 1 ]; then
         log "Профиль обфускации 3.0: preset=$P3 template=${T3:-default}"
         AWG_CONFS="$AWG_DIR/${IFACE3}.conf" "$DEST/awg-obfuscation.sh" --v3 \
             --preset "$P3" ${T3:+--template "$T3"} --fp "$F" --mtu "$MTU3" \
-            ${ENDPOINT:+--host "$ENDPOINT"} "$mode3"
+            "$mode3"
     fi
 }
 
