@@ -175,6 +175,17 @@ PYBK
     return "$rc"
 }
 
+# Раздел архива бывает пуст законно (нет своих custom*.sh, нет lua-файлов
+# knot) — тогда копировать нечего и молчать правильно. А вот отказ копирования
+# непустого раздела — это половина восстановленного состояния, и раньше он
+# уходил в /dev/null вместе с законным «нечего копировать».
+_restore_part() {  # _restore_part <каталог в архиве> <куда> <что это>
+    [ -d "$1" ] || return 0
+    [ -n "$(ls -A "$1" 2>/dev/null || true)" ] || return 0
+    cp -r "$1/." "$2/" || { err "не восстановлено: $3 ($1 → $2)"; rc=1; }
+    return 0
+}
+
 do_restore() {
     local file="$1"
     local orig="$1"          # путь владельца, а не расшифрованная копия в /tmp
@@ -240,7 +251,7 @@ do_restore() {
     # но и все НОВЫЕ: awg-client берёт хост только отсюда.
     local ep_local ep_arch
     ep_local="$( . "$AWG_DIR/services.env" 2>/dev/null || true; printf '%s' "${ENDPOINT:-}" )"
-    cp "$stage"/amneziawg/* "$AWG_DIR/" 2>/dev/null || true
+    _restore_part "$stage/amneziawg" "$AWG_DIR" "серверные конфиги и профили"
     ep_arch="$( . "$AWG_DIR/services.env" 2>/dev/null || true; printf '%s' "${ENDPOINT:-}" )"
     if [ -n "$ep_local" ] && [ -n "$ep_arch" ] && [ "$ep_local" != "$ep_arch" ]; then
         # Побеждает местное: оно записано установщиком на ЭТОЙ машине и
@@ -265,7 +276,7 @@ do_restore() {
         err "существуют только там, восстановить выданные конфиги нечем."
         rc=1
     fi
-    cp "$stage"/state/* "$DEST/" 2>/dev/null || true
+    _restore_part "$stage/state" "$DEST" "сроки и состояние установки"
     # Осиротевшие журналы прежней базы. Без этого sqlite при следующем
     # открытии проигрывает старый -wal ПОВЕРХ положенного файла и отдаёт
     # данные прежней установки вместо восстановленных — молча, без ошибки.

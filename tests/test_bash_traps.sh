@@ -278,7 +278,7 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 head_ "7. Восстановление из .enc не оставляет ключи в /tmp"
-DR="$(sed -n '/^do_restore()/,/^}$/p' bin/awg-backup.sh)"
+DR="$(sed -n '/^_restore_part()/,/^}$/p;/^do_restore()/,/^}$/p' bin/awg-backup.sh)"
 if [ -z "$DR" ]; then
     bad "не нашли do_restore" "мерить нечего"
 elif ! command -v openssl >/dev/null 2>&1; then
