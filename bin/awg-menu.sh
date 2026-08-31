@@ -28,10 +28,19 @@ PY="$DEST/venv/bin/python"
 c_hdr=$'\033[1;35m'; c_ok=$'\033[1;32m'; c_no=$'\033[1;31m'
 c_dim=$'\033[2m'; c_b=$'\033[1m'; c_x=$'\033[0m'
 
-[ "$(id -u)" = 0 ] || { echo "Нужны права root." >&2; exit 1; }
-[ -f "$SERVICES" ] || { echo "Сервер не установлен: нет $SERVICES" >&2; exit 1; }
-# shellcheck disable=SC1090
-. "$SERVICES"
+# Справка не требует ни root, ни установленного сервера: владелец, набравший
+# --help, получал отказ вместо справки — сначала про права, потом про
+# services.env. Всё остальное меню без того и другого действительно
+# бессмысленно, и там проверки остаются.
+case "${1:-}" in
+    -h|--help|help) ;;
+    *)
+        [ "$(id -u)" = 0 ] || { echo "Нужны права root." >&2; exit 1; }
+        [ -f "$SERVICES" ] || { echo "Сервер не установлен: нет $SERVICES" >&2; exit 1; }
+        # shellcheck disable=SC1090
+        . "$SERVICES"
+        ;;
+esac
 
 pause() { printf '\n%sНажми Enter…%s' "$c_dim" "$c_x"; read -r _ || true; }
 
@@ -334,7 +343,9 @@ if [ $# -gt 0 ]; then
         backup) shift; exec "$DEST/awg-backup.sh" backup "$@" ;;
         stats)  exec "$PY" "$DEST/awg_stats.py" overview ;;
         menu)   ;;   # явный вызов меню
-        -h|--help) sed -n '3,20p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        # Справка — это шапка файла, а не диапазон строк: жёсткие номера не
+        # знают, где она кончилась, и ошибаются молча в обе стороны.
+        -h|--help) awk 'NR==1||/^# *SPDX-/{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0 ;;
         *) echo "Неизвестная команда: $1 (без аргументов открывается меню)" >&2; exit 2 ;;
     esac
 fi

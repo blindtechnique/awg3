@@ -104,6 +104,8 @@ run "секреты не читаются кем попало: профили к
     bash tests/test_secret_perms.sh
 run "Enter в выборе версии означает «как есть», а не «ещё один слой»" \
     bash tests/test_layer_choice.sh
+run "--help печатает справку, а не все комментарии файла" \
+    bash tests/test_help.sh
 
 head_ "Модель согласованности"
 run "CONSISTENCY.md сверен с кодом в обе стороны" \
