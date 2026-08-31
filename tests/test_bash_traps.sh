@@ -412,6 +412,75 @@ else
     esac
 fi
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+head_ "10. Обрезанный services.env отвергается, а не принимается за исправный"
+# `${!k+x}` истинно и для `PORT2=''` — файл, обрезанный ровно на знаке
+# равенства, проходил страж, а дальше `PORT="${PORT2:-0}"` выписывал клиенту
+# `Endpoint host:0`. Спрашиваем непустоту только у включённого слоя: на сервере
+# с одним слоем 2.0 значения 3.0 могут быть пустыми законно.
+PSF="$(sed -n '/^plan_services()/,/^}$/p' install.sh)"
+if [ -z "$PSF" ]; then
+    bad "не нашли plan_services" "мерить нечего"
+else
+    guard() {  # guard <содержимое services.env> → вывод
+        local d; d="$(mktemp -d)"
+        printf '%s\n' "$1" > "$d/services.env"
+        ( set -uo pipefail
+          # shellcheck disable=SC2034
+          export SERVICES="$d/services.env" CLI_PORTS="" CLI_VER="" CLI_DNS=""
+          log() { :; }
+          err() { printf 'ERR %s\n' "$*"; }
+          installed() { [ -f "$SERVICES" ]; }
+          busy_ports() { :; }; pick_random_port() { echo 40000; }
+          eval "$PSF"
+          plan_services
+          printf 'PASS PORT2=[%s]\n' "${PORT2:-}" ) 2>&1
+        rm -rf "$d"
+    }
+
+    FULL="LAYER2=1
+LAYER3=0
+IFACE2=awg2
+IFACE3=awg3
+SUBNET2=10.29.79
+SUBNET3=10.29.80
+PORT2=51820
+PORT3=51821"
+
+    out="$(guard "$FULL")"
+    case "$out" in
+        *PASS*) ok "полный файл проходит" ;;
+        *) bad "исправный файл отвергнут" "$out" ;;
+    esac
+
+    out="$(guard "${FULL%%PORT2=*}PORT2=
+PORT3=")"
+    case "$out" in
+        *"ERR"*"обрезан"*PORT2*) ok "обрезанный отвергнут, и назван ключ" ;;
+        *PASS*) bad "обрезанный файл прошёл насквозь" "клиенту уедет Endpoint host:0" ;;
+        *) bad "неожиданный исход" "$out" ;;
+    esac
+    case "$out" in
+        *"restore"*) ok "и сказано, чем чинить" ;;
+        *) bad "нет подсказки" "$out" ;;
+    esac
+
+    # Слой 3.0 выключен — его пустые значения законны и отказа не вызывают.
+    out="$(guard "LAYER2=1
+LAYER3=0
+IFACE2=awg2
+IFACE3=
+SUBNET2=10.29.79
+SUBNET3=
+PORT2=51820
+PORT3=")"
+    case "$out" in
+        *PASS*) ok "пустые значения выключенного слоя не мешают" ;;
+        *) bad "отказ из-за выключенного слоя" "исправному серверу отказали в обновлении: $out" ;;
+    esac
+fi
+
 printf '\n'
 [ "$fail" = 0 ] && echo "═══ ВСЁ ЗЕЛЁНОЕ ═══" || echo "═══ ЕСТЬ ПАДЕНИЯ ═══"
 exit $fail
