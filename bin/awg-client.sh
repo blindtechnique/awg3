@@ -331,15 +331,15 @@ regen_all() {
     local same=0 changed=0 changed_list="" before after
     # shellcheck disable=SC1090
     . "$SERVICES"
-    local svc conf name prof n_left missed=0
+    local svc conf name prof v3 n_left missed=0
     # Ненужные слои отсеиваем ДО resolve_service: она завершается через die(),
     # то есть уронила бы весь regen-all, а не одну итерацию.
     for svc in awg2 awg3; do
         case "$svc" in
             awg2) [ "${LAYER2:-0}" = 1 ] || continue
-                  prof="$AWG_DIR/obfuscation.env" ;;
+                  prof="$AWG_DIR/obfuscation.env"; v3="" ;;
             awg3) [ "${LAYER3:-0}" = 1 ] || continue
-                  prof="$AWG_DIR/obfuscation3.env" ;;
+                  prof="$AWG_DIR/obfuscation3.env"; v3=" --v3" ;;
         esac
         [ -d "${CLIENT_DIR}/${svc}" ] || continue
         # Пропуск слоя без профиля остаётся — иначе die() внутри
@@ -353,7 +353,7 @@ regen_all() {
             if [ "$n_left" = 0 ]; then continue; fi
             err "слой $svc ПРОПУЩЕН: нет профиля $prof"
             err "   $n_left конфигов остались на прежнем профиле — эти клиенты не соединятся"
-            err "   выпусти профиль (awg-obfuscation --regenerate --apply) и повтори regen-all"
+            err "   выпусти профиль (awg-obfuscation$v3 --regenerate --apply) и повтори regen-all"
             missed=$((missed + 1))
             continue
         fi

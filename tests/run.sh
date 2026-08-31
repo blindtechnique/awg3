@@ -100,6 +100,8 @@ run "перезапуск после --apply и код возврата" \
     bash tests/test_obf_restart.sh bin/awg-obfuscation.sh
 run "regen-all: пропущенный слой слышен и виден по коду" \
     bash tests/test_regen_skip.sh
+run "секреты не читаются кем попало: профили клиентов и ключ слоя 3.0" \
+    bash tests/test_secret_perms.sh
 
 head_ "Модель согласованности"
 run "CONSISTENCY.md сверен с кодом в обе стороны" \

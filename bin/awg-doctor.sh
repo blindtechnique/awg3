@@ -759,7 +759,7 @@ deep_check() {  # deep_check <awg2|awg3>
         ip netns del "$ns" >/dev/null 2>&1
         ip link del "$veth" >/dev/null 2>&1
         "$DEST/awg-client.sh" del "$tmp" "$svc" >/dev/null 2>&1
-        rm -f "$AWG_DIR/$tmp.conf" "/tmp/$tmp.v3" 2>/dev/null
+        rm -f "$AWG_DIR/$tmp.conf" "$AWG_DIR/$tmp.v3" 2>/dev/null
         iptables -w -t nat -D POSTROUTING -s 10.199.0.0/24 -j MASQUERADE 2>/dev/null
     }
     trap cleanup_deep EXIT
@@ -793,7 +793,13 @@ deep_check() {  # deep_check <awg2|awg3>
         # утилиты не понимают, а kernel-модуль их не умеет. Поднимаем клиента
         # тем же userspace-демоном и досылаем v3-параметры через UAPI.
         local addr; addr="$(awk -F'[[:space:]]*=[[:space:]]*' '/^Address/{print $2; exit}' "$AWG_DIR/$tmp.conf")"
-        python3 - "$AWG_DIR/$tmp.conf" > "/tmp/$tmp.v3" <<'PY'
+        # Здесь оказывается ключ header protection слоя 3.0 в открытом виде —
+        # общий для сервера и всех его клиентов. В общем /tmp он ложился под
+        # предсказуемым именем и с правами 0644 на всё время проверки. Кладём
+        # рядом с временным конфигом, который строкой выше закрыт явным
+        # chmod 600: каталог не общий, значит нет и подмены по симлинку.
+        : > "$AWG_DIR/$tmp.v3"; chmod 600 "$AWG_DIR/$tmp.v3"
+        python3 - "$AWG_DIR/$tmp.conf" > "$AWG_DIR/$tmp.v3" <<'PY'
 import base64, sys
 names = {"HeaderProtectionKey": "header_protection_key",
          "ContentPaddingAddition": "content_padding_addition",
@@ -815,7 +821,7 @@ PY
         sleep 2
         ip netns exec "$ns" awg setconf "$dev" <(awg-quick strip "$tmp" 2>/dev/null \
             | grep -vE '^(HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts) *=') >/dev/null 2>&1
-        [ -s "/tmp/$tmp.v3" ] && ip netns exec "$ns" python3 "$DEST/awg-uapi.py" set "$dev" --from-file "/tmp/$tmp.v3" >/dev/null 2>&1
+        [ -s "$AWG_DIR/$tmp.v3" ] && ip netns exec "$ns" python3 "$DEST/awg-uapi.py" set "$dev" --from-file "$AWG_DIR/$tmp.v3" >/dev/null 2>&1
         ip netns exec "$ns" ip address add "$addr" dev "$dev" 2>/dev/null
         ip netns exec "$ns" ip link set mtu "${MTU3:-1380}" up dev "$dev"
         ip netns exec "$ns" ip route add default dev "$dev" 2>/dev/null
