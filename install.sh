@@ -1024,6 +1024,10 @@ ask_params() {
     local VER_CHOICE PRESET=medium TEMPLATE="" FP=chrome
     local PRESET3="" TEMPLATE3=""      # пусто = как у слоя 2.0
     AWG_VER="${CLI_VER:-}"
+    # Что на сервере уже стоит. Читаем в подоболочке: state объявляет десяток
+    # переменных, и точка здесь затёрла бы то, что прогон уже решил.
+    local _saved_ver=""
+    [ -f "$STATE" ] && _saved_ver="$( . "$STATE" 2>/dev/null || true; printf '%s' "${AWG_VER:-}" )"
     if [ -z "$AWG_VER" ] && has_tty; then
         echo "═══════════════════════════════════════════════════════════════" > /dev/tty
         echo "  Какую версию AmneziaWG поднять?" > /dev/tty
@@ -1033,12 +1037,24 @@ ask_params() {
         echo "   2) 3.0        — header protection, content padding, рандомные" > /dev/tty
         echo "                   тайминги. Датапас userspace (amneziawg-go)." > /dev/tty
         echo "                   Нужны свежие клиентские приложения." > /dev/tty
-        echo "   3) обе сразу  — два независимых слоя [по умолчанию]." > /dev/tty
+        echo "   3) обе сразу  — два независимых слоя." > /dev/tty
         echo "                   Клиент заводится в нужный одной командой." > /dev/tty
-        ask_pick VER_CHOICE 3 "1 2 3"
+        # Умолчание — то, что уже стоит. Раньше здесь всегда было «обе сразу»,
+        # и Enter на 2.0-сервере означал сборку Go, ещё два интерфейса, две
+        # подсети и два порта — при том что владелец пришёл менять обфускацию.
+        local _def=3
+        case "$_saved_ver" in
+            2)    _def=1 ;;
+            3)    _def=2 ;;
+            both) _def=3 ;;
+        esac
+        [ -n "$_saved_ver" ] && echo "   Сейчас на сервере: $_saved_ver (Enter — оставить как есть)." > /dev/tty
+        ask_pick VER_CHOICE "$_def" "1 2 3"
         case "$VER_CHOICE" in 1) AWG_VER=2 ;; 2) AWG_VER=3 ;; *) AWG_VER=both ;; esac
     fi
-    [ -n "$AWG_VER" ] || AWG_VER=both
+    # Без терминала диалога не было вовсе, и «both» здесь означало бы установку
+    # слоя, которого владелец не заказывал, — молча. Берём то, что стоит.
+    [ -n "$AWG_VER" ] || AWG_VER="${_saved_ver:-both}"
     case "$AWG_VER" in 2|3|both) ;; *) log "неизвестное --awg '$AWG_VER', беру both"; AWG_VER=both ;; esac
 
     if [ -n "$CLI_PRESET" ]; then

@@ -102,6 +102,8 @@ run "regen-all: пропущенный слой слышен и виден по 
     bash tests/test_regen_skip.sh
 run "секреты не читаются кем попало: профили клиентов и ключ слоя 3.0" \
     bash tests/test_secret_perms.sh
+run "Enter в выборе версии означает «как есть», а не «ещё один слой»" \
+    bash tests/test_layer_choice.sh
 
 head_ "Модель согласованности"
 run "CONSISTENCY.md сверен с кодом в обе стороны" \
