@@ -128,6 +128,8 @@ run "доктор целиком: исправный сервер молчит, 
 head_ "Диагностика"
 run "слой 3.0: «ключа нет» отличается от «спросить не удалось»" \
     bash tests/test_doctor_v3.sh bin/awg-doctor.sh
+run "блокеры переезда в ядро: отчёт честен в обе стороны, кэш бережёт лимит" \
+    bash tests/test_upstream_blockers.sh
 
 head_ "Бот"
 run "меню обфускации: предупреждение, фон, исход" "$PY" tests/test_bot_obfuscation.py

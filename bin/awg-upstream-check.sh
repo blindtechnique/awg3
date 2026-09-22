@@ -54,6 +54,99 @@ kmod3_state() {
     echo unknown
 }
 
+# ── блокеры переезда датапаса 3.0 в ядро ────────────────────────────────────
+# Наличие параметров в модуле ещё не значит, что на нём можно работать: код 3.0
+# лежит в выпущенном теге с 30.07.2026, а переезд не сделан из-за качества.
+# Поэтому спрашиваем не «есть ли атрибут», а «закрыты ли дефекты».
+#
+# Список ведётся РУКАМИ и меняется вместе с кодом: это не «все issue апстрима»,
+# а ровно те, на которых стоит решение держать 3.0 в userspace. Обоснование
+# каждой — в README, раздел «Почему слой 3.0 не в ядре и когда будет».
+KMOD_REPO="${AWG_KMOD_REPO:-amnezia-vpn/amneziawg-linux-kernel-module}"
+KMOD_BLOCKERS="${AWG_KMOD_BLOCKERS:-215 222 225 226 227 228 233 253}"
+BLOCKERS_CACHE="${AWG_BLOCKERS_CACHE:-$DEST/.kmod-blockers}"
+BLOCKERS_TTL="${AWG_BLOCKERS_TTL:-21600}"   # 6 часов
+
+# Печатает по строке на issue: "<номер> <open|closed>". Возвращает 1, если хоть
+# об одной узнать не удалось: частичный ответ хуже отсутствия — пропущенная
+# открытая issue превратилась бы в «всё закрыто, можно переезжать».
+blockers_fetch() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    local n raw st out="" want=0 got=0
+    for n in $KMOD_BLOCKERS; do
+        want=$((want + 1))
+        raw="$(curl -fsS --max-time 10 "https://api.github.com/repos/$KMOD_REPO/issues/$n" 2>/dev/null || true)"
+        [ -n "$raw" ] || continue
+        st="$(printf '%s' "$raw" | python3 -c 'import sys, json
+try:
+    print(json.load(sys.stdin).get("state", ""))
+except Exception:
+    pass' 2>/dev/null || true)"
+        case "$st" in
+            open|closed) out="${out}${n} ${st}"$'\n'; got=$((got + 1)) ;;
+        esac
+    done
+    [ "$got" = "$want" ] || return 1
+    printf '%s' "$out"
+}
+
+# Ответ кэшируем: у неавторизованного API GitHub 60 запросов в час на адрес, а
+# кнопку «Проверить обновления» в боте нажимают сколько угодно раз. Без кэша
+# владелец получал бы 403 ровно тогда, когда ответ нужен.
+blockers_state() {  # печатает строки "<номер> <open|closed>"; 1 — данных нет
+    local now age=0 mtime new
+    now="$(date +%s)"
+    if [ -f "$BLOCKERS_CACHE" ]; then
+        mtime="$(stat -c %Y "$BLOCKERS_CACHE" 2>/dev/null || echo 0)"
+        age=$((now - mtime))
+    fi
+    if [ ! -f "$BLOCKERS_CACHE" ] || [ "$age" -ge "$BLOCKERS_TTL" ]; then
+        new="$(blockers_fetch || true)"
+        # Пишем только полный ответ. Неполный не кэшируем вовсе, иначе «не
+        # смогли спросить» осело бы в кэше как факт и жило там шесть часов.
+        if [ -n "$new" ]; then
+            mkdir -p "$(dirname "$BLOCKERS_CACHE")" 2>/dev/null || true
+            if printf '%s' "$new" > "$BLOCKERS_CACHE.tmp" 2>/dev/null; then
+                mv -f "$BLOCKERS_CACHE.tmp" "$BLOCKERS_CACHE" 2>/dev/null || rm -f "$BLOCKERS_CACHE.tmp"
+            else
+                rm -f "$BLOCKERS_CACHE.tmp" 2>/dev/null || true
+            fi
+        fi
+    fi
+    [ -s "$BLOCKERS_CACHE" ] || return 1
+    cat "$BLOCKERS_CACHE"
+}
+
+# Отдельный раздел вывода — не обновление, а состояние вопроса «когда в ядро».
+# Вынесен функцией, чтобы стенд мог прогнать все три исхода, а не читать их
+# глазами: ветка «проверить не удалось» обязана молчать о готовности, и это
+# единственное, что отличает честный отчёт от ложной зелени.
+kmod3_report() {
+    case "$KMOD3_STATE" in
+        v30|v31) ;;
+        *) return 0 ;;
+    esac
+    echo
+    echo "Переезд датапаса 3.0 в ядро"
+    echo "  Параметры 3.0 в модуле апстрима есть с тега v3.0.20260730."
+    if [ "$BLOCKERS_KNOWN" = 1 ] && [ "$BLOCKERS_OPEN" != 0 ]; then
+        echo "  Открыто блокеров: $BLOCKERS_OPEN из $BLOCKERS_TOTAL —$BLOCKERS_LIST"
+        echo "  Пока открыт хотя бы один, слой 3.0 остаётся на amneziawg-go."
+        echo "  Что именно сломано — в README, «Почему слой 3.0 не в ядре»."
+    elif [ "$BLOCKERS_KNOWN" = 1 ]; then
+        echo "  Открыто блокеров: 0 из $BLOCKERS_TOTAL — все известные закрыты."
+        echo "  Это НЕ команда переезжать: решение принимается руками и после"
+        echo "  проверки на стенде. Начать — с README, «Почему слой 3.0 не в ядре»."
+    else
+        echo "  Состояние блокеров проверить не удалось (нет сети, нет python3"
+        echo "  или исчерпан лимит запросов GitHub)."
+        echo "  Решение от этого не меняется: слой 3.0 остаётся на amneziawg-go."
+    fi
+    if [ "$KMOD3_STATE" = v31 ]; then
+        echo "  В master апстрима уже 3.1 (RandomTrailers, DisableCookies) — не берём."
+    fi
+}
+
 installed_go_ref() {
     [ -d "$SRC/amneziawg-go/.git" ] || { echo ""; return; }
     git -C "$SRC/amneziawg-go" describe --tags --exact-match 2>/dev/null \
@@ -123,8 +216,29 @@ KMOD3_STATE=""
 [ -f /etc/amnezia/amneziawg/services.env ] && . /etc/amnezia/amneziawg/services.env 2>/dev/null || true
 [ "${LAYER3:-0}" = 1 ] && KMOD3_STATE="$(kmod3_state)"
 
+# Блокеры спрашиваем там же и по тому же условию: без слоя 3.0 вопрос «когда в
+# ядро» не стоит, а лишние запросы к GitHub съедают лимит.
+BLOCKERS_OPEN=0; BLOCKERS_TOTAL=0; BLOCKERS_KNOWN=0; BLOCKERS_LIST=""
+if [ "${LAYER3:-0}" = 1 ]; then
+    BLOCKERS_TXT="$(blockers_state || true)"
+    if [ -n "$BLOCKERS_TXT" ]; then
+        BLOCKERS_KNOWN=1
+        while read -r bnum bstate; do
+            [ -n "$bnum" ] || continue
+            BLOCKERS_TOTAL=$((BLOCKERS_TOTAL + 1))
+            if [ "$bstate" = open ]; then
+                BLOCKERS_OPEN=$((BLOCKERS_OPEN + 1))
+                BLOCKERS_LIST="$BLOCKERS_LIST #$bnum"
+            fi
+        done <<< "$BLOCKERS_TXT"
+    fi
+fi
+
 if [ "$JSON" = 1 ]; then
-    printf '{"updates": %d, "kmod3": "%s", "items": [' "$UPDATES" "${KMOD3_STATE:-n/a}"
+    printf '{"updates": %d, "kmod3": "%s", "kmod3_blockers": {"known": %s, "open": %d, "total": %d}, "items": [' \
+        "$UPDATES" "${KMOD3_STATE:-n/a}" \
+        "$([ "$BLOCKERS_KNOWN" = 1 ] && echo true || echo false)" \
+        "$BLOCKERS_OPEN" "$BLOCKERS_TOTAL"
     first=1
     for r in "${ROWS[@]}"; do
         IFS='|' read -r what cur new upd <<< "$r"
@@ -149,21 +263,7 @@ elif [ "$QUIET" = 0 ]; then
         echo "(конфиги, порты и клиенты при этом не меняются)"
     fi
 
-    # Отдельной строкой — не обновление, а смена возможностей апстрима.
-    case "$KMOD3_STATE" in
-        v30|v31)
-            echo
-            echo "Слой 3.0 в kernel-модуле апстрима есть (PR #192 влит 30.07.2026),"
-            echo "но переезд датапаса с userspace на ядро ОТЛОЖЕН:"
-            echo "  • kmod issue #215 — регрессия 3.0→3.1: хендшейк проходит, трафика нет;"
-            echo "  • amnezia-client issue #3043 — то же самое, причём и на userspace 3.1,"
-            echo "    и на kernel-модуле 3.1 одинаково."
-            echo "Обе открыты без ответа мейнтейнеров. Чистого тега модуля сейчас нет:"
-            echo "в v3.0.20260805 use-after-free в send.c, а фикс попал только в v3.1."
-            [ "$KMOD3_STATE" = v31 ] && \
-                echo "В master уже 3.1 (RandomTrailers, DisableCookies) — тем более не берём."
-            echo "Сейчас 3.0 работает через userspace-датапас, и это штатный режим." ;;
-    esac
+    kmod3_report
     if [ -n "${UPSTREAM_NOTE:-}" ]; then
         echo
         echo "ℹ️  $UPSTREAM_NOTE"
