@@ -253,6 +253,38 @@ screen_backup() {
     pause
 }
 
+# Порт — единственная настройка, которая меняется ПОСЛЕ выдачи конфигов и при
+# этом делает их недействительными. Поэтому предупреждение стоит до вопроса о
+# номере, а не после: прочитать его надо прежде, чем вводить порт.
+screen_ports() {
+    cls
+    printf '%s═══ UDP-порты ═══%s\n\n' "$c_hdr" "$c_x"
+    "$DEST/awg-port.sh" show || true
+    echo
+    if [ "${LAYER2:-0}" = 1 ]; then echo "   1) Сменить порт слоя 2.0"; fi
+    if [ "${LAYER3:-0}" = 1 ]; then echo "   2) Сменить порт слоя 3.0"; fi
+    echo "   0) Назад"
+    local a; printf '\n  Выбор [0]: '; read -r a || a=0
+    local svc=""
+    case "${a:-0}" in
+        1) [ "${LAYER2:-0}" = 1 ] && svc=awg2 ;;
+        2) [ "${LAYER3:-0}" = 1 ] && svc=awg3 ;;
+    esac
+    [ -n "$svc" ] || return 0
+    echo
+    printf '  %s⚠️  После смены порта КАЖДОМУ клиенту этого слоя придётся%s\n' "$c_no" "$c_x"
+    printf '  %s    заново скачать конфиг: старый файл указывает на прежний%s\n' "$c_no" "$c_x"
+    printf '  %s    порт и больше не соединится.%s\n' "$c_no" "$c_x"
+    local p; printf '\n  Новый порт (Enter — подобрать свободный, 0 — отмена): '
+    read -r p || p=0
+    p="$(printf '%s' "$p" | tr -d ' \t\r')"
+    [ "$p" = 0 ] && return 0
+    [ -z "$p" ] && p=auto
+    cls
+    "$DEST/awg-port.sh" set "$svc" "$p" || true
+    pause
+}
+
 screen_doctor() {
     cls
     printf '%s═══ Диагностика ═══%s\n\n' "$c_hdr" "$c_x"
@@ -367,11 +399,12 @@ while :; do
     echo "   6) Статистика"
     echo "   7) Информация о сервере"
     echo "   8) Обфускация"
-    echo "   9) Диагностика"
-    echo "  10) Бэкап и восстановление"
-    echo "  11) Сервисы и журналы"
-    echo "  12) Telegram-бот"
-    echo "  13) Удалить AmneziaWG полностью"
+    echo "   9) UDP-порты"
+    echo "  10) Диагностика"
+    echo "  11) Бэкап и восстановление"
+    echo "  12) Сервисы и журналы"
+    echo "  13) Telegram-бот"
+    echo "  14) Удалить AmneziaWG полностью"
     echo "   0) Выход"
     printf '\n  Выбор: '
     read -r choice || exit 0
@@ -384,11 +417,12 @@ while :; do
         6) screen_stats ;;
         7) screen_info ;;
         8) screen_obfuscation ;;
-        9) screen_doctor ;;
-        10) screen_backup ;;
-        11) screen_service ;;
-        12) screen_bot ;;
-        13) screen_uninstall ;;
+        9) screen_ports ;;
+        10) screen_doctor ;;
+        11) screen_backup ;;
+        12) screen_service ;;
+        13) screen_bot ;;
+        14) screen_uninstall ;;
         0|q|"") clear; exit 0 ;;
         *) ;;
     esac
