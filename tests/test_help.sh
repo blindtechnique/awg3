@@ -37,6 +37,7 @@ bin/awg-client.sh
 bin/awg-doctor.sh
 bin/awg-menu.sh
 bin/awg-obfuscation.sh
+bin/awg-port.sh
 bin/awg-upstream-check.sh
 install.sh"
 

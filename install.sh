@@ -313,6 +313,15 @@ check_cli_ports() {  # 0, если --ports пуст или корректен
 busy_ports() { ss -lunH 2>/dev/null | awk '{print $(NF-1)}' | grep -oE '[0-9]+$' | sort -u || true; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
+# Без трубы, по той же причине, что и в pick_random_port: `echo "$busy" |
+# grep -qx` под pipefail отдаёт 141, когда совпадение нашлось в начале списка,
+# и ЗАНЯТЫЙ порт объявлялся бы свободным.
+port_busy() {  # port_busy <порт>
+    local busy; busy="$(busy_ports)"
+    case $'\n'"$busy"$'\n' in *$'\n'"$1"$'\n'*) return 0 ;; esac
+    return 1
+}
+
 pick_random_port() {  # pick_random_port <занятые через пробел>
     local extra="${1:-}" busy p i
     busy="$(busy_ports; printf '%s\n' $extra; echo 22; echo 53; echo 80; echo 443)"
@@ -332,6 +341,36 @@ pick_random_port() {  # pick_random_port <занятые через пробел
         esac
     done
     echo 51820
+}
+
+# Порт закрепляется НАВСЕГДА: от него зависит Endpoint во всех выданных
+# конфигах. Поэтому его надо спросить, а не выбрать молча — иначе владелец
+# узнаёт номер уже после установки и не может его изменить. Пустой ответ
+# оставляет прежнее поведение: случайный свободный.
+#
+# Занятый порт не запрещаем, а переспрашиваем: `ss` не видит сокет, открытый
+# в другом сетевом пространстве имён, а вот сам слой там жить может.
+ask_port() {  # ask_port <имя переменной> <подпись> <исключить> → "" = авто
+    local __v="$1" label="$2" excl="${3:-}" a
+    printf -v "$__v" '%s' ""
+    has_tty || return 0
+    while :; do
+        printf '  Порт для %s (Enter — случайный свободный): ' "$label" > /dev/tty
+        read -r a < /dev/tty || return 0
+        a="$(printf '%s' "$a" | tr -d ' \t\r')"
+        [ -z "$a" ] && return 0
+        if ! valid_port "$a"; then
+            printf '  Нужно число от 1 до 65535.\n' > /dev/tty; continue
+        fi
+        if [ -n "$excl" ] && [ "$a" = "$excl" ]; then
+            printf '  Этот порт уже выбран для другого слоя.\n' > /dev/tty; continue
+        fi
+        if port_busy "$a"; then
+            ask_yn "  ⚠️ Порт $a уже слушается на сервере. Всё равно взять?" n || continue
+        fi
+        printf -v "$__v" '%s' "$a"
+        return 0
+    done
 }
 
 # ── зависимости ──────────────────────────────────────────────────────────────
@@ -586,6 +625,7 @@ deploy_files() {
     ln -sf "$DEST/awg-obfuscation.sh" /usr/local/bin/awg-obfuscation
     ln -sf "$DEST/awg-backup.sh"      /usr/local/bin/awg-backup
     ln -sf "$DEST/awg-doctor.sh"      /usr/local/bin/awg-doctor
+    ln -sf "$DEST/awg-port.sh"        /usr/local/bin/awg-port
     # README обещает команду awg-upstream-check, и бот зовёт этот скрипт полным
     # путём — а в PATH его не было вовсе.
     ln -sf "$DEST/awg-upstream-check.sh" /usr/local/bin/awg-upstream-check
@@ -736,8 +776,29 @@ plan_services() {
         check_cli_ports || { err "--ports: нужно два разных порта через запятую"; exit 2; }
         p2="${CLI_PORTS%%,*}"; p3="${CLI_PORTS##*,}"
     else
-        p2="$(pick_random_port)"
-        p3="$(pick_random_port "$p2")"
+        # Спрашиваем только про те слои, которые ставим. LAYER2/LAYER3 здесь
+        # ещё не выставлены — их считают из AWG_VER ПОСЛЕ нас, поэтому смотрим
+        # на сам AWG_VER. В режиме --plan не спрашиваем ничего: план обязан
+        # показывать, а не вести диалог.
+        local ans2="" ans3=""
+        if [ "${PLAN:-0}" != 1 ] && has_tty; then
+            echo > /dev/tty
+            echo "═══════════════════════════════════════════════════════════════" > /dev/tty
+            echo "  UDP-порты. Закрепляются НАВСЕГДА: от порта зависит Endpoint" > /dev/tty
+            echo "  во всех выданных конфигах, и сменить его потом — значит" > /dev/tty
+            echo "  раздать клиентам новые файлы (awg-port set)." > /dev/tty
+            echo > /dev/tty
+            case "${AWG_VER:-both}" in
+                2) ask_port ans2 "слоя 2.0" "" ;;
+                3) ask_port ans3 "слоя 3.0" "" ;;
+                *) ask_port ans2 "слоя 2.0" ""
+                   ask_port ans3 "слоя 3.0" "$ans2" ;;
+            esac
+        fi
+        # Случайный выбирается с исключением уже названного: иначе рандом мог
+        # бы выдать ровно тот порт, который владелец отдал другому слою.
+        p2="${ans2:-$(pick_random_port "$ans3")}"
+        p3="${ans3:-$(pick_random_port "$p2")}"
     fi
     IFACE2="${IFACE2:-awg2}"; IFACE3="${IFACE3:-awg3}"
     SUBNET2="${SUBNET2:-10.29.79}"; SUBNET3="${SUBNET3:-10.29.80}"
@@ -1182,7 +1243,8 @@ uninstall_all() {
     done
 
     rm -f /usr/local/bin/awg3 /usr/local/bin/awg-client /usr/local/bin/awg-obfuscation \
-          /usr/local/bin/awg-backup /usr/local/bin/awg-doctor /usr/local/bin/awg-upstream-check
+          /usr/local/bin/awg-backup /usr/local/bin/awg-doctor /usr/local/bin/awg-upstream-check \
+          /usr/local/bin/awg-port
     rm -rf "$DEST" "$AWG_DIR" "$SRC/amneziawg-go" "$SRC/amneziawg-tools" \
            "$SRC/amneziawg-linux-kernel-module"
     # Метку ревизии модуля тоже сносим: без неё rmdir "$SRC" ниже упирался в
